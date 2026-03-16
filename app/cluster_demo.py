@@ -18,11 +18,14 @@ import pandas as pd
 import psycopg
 import streamlit as st
 
+from logging_utils import setup_file_logger
+
 APP_TITLE = "BiHA PostgreSQL Cluster Demo"
 DEFAULT_HISTORY = 120
 MAX_WORKERS = 32
 METRICS_FETCH_WORKERS = 8
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+LOGGER = setup_file_logger()
 
 
 @dataclass
@@ -103,6 +106,7 @@ class WorkloadGenerator:
                 with self._lock:
                     self._stats["write_tx" if write_tx else "read_tx"] += 1
             except Exception:
+                LOGGER.exception("Workload worker transaction failed")
                 with self._lock:
                     self._stats["errors"] += 1
             next_tick += interval
@@ -197,6 +201,16 @@ def load_cluster_config(path: Path) -> ClusterConfig:
     return ClusterConfig(nodes=nodes, poll_interval_sec=cfg.get("poll_interval_sec", 2))
 
 
+def mask_dsn(dsn: str) -> str:
+    parsed = urlparse(dsn)
+    if not parsed.netloc or "@" not in parsed.netloc:
+        return dsn
+    creds, host_part = parsed.netloc.rsplit("@", 1)
+    username = creds.split(":", 1)[0] if creds else "user"
+    masked_netloc = f"{username}:***@{host_part}"
+    return parsed._replace(netloc=masked_netloc).geturl()
+
+
 def fetch_node_metrics(node: NodeConfig, target_db: str) -> dict[str, Any]:
     result: dict[str, Any] = {
         "node": node.name,
@@ -270,6 +284,12 @@ def fetch_node_metrics(node: NodeConfig, target_db: str) -> dict[str, Any]:
                     )
     except Exception as exc:
         result["error"] = str(exc)
+        LOGGER.exception(
+            "DB metrics fetch failed for node=%s target_db=%s dsn=%s",
+            node.name,
+            target_db,
+            mask_dsn(node.dsn),
+        )
 
     return result
 
@@ -363,9 +383,21 @@ def run_node_action(node: NodeConfig, action: str) -> tuple[bool, str]:
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
     except subprocess.TimeoutExpired:
+        LOGGER.error("SSH command timeout for node=%s action=%s host=%s", node.name, action, node.ssh_host)
         return False, "SSH command timed out after 15 seconds"
     ok = proc.returncode == 0
     output = (proc.stdout + "\n" + proc.stderr).strip()
+    if ok:
+        LOGGER.info("SSH action succeeded for node=%s action=%s host=%s", node.name, action, node.ssh_host)
+    else:
+        LOGGER.error(
+            "SSH action failed for node=%s action=%s host=%s returncode=%s output=%s",
+            node.name,
+            action,
+            node.ssh_host,
+            proc.returncode,
+            output or "<empty>",
+        )
     return ok, output or "OK"
 
 
@@ -469,6 +501,10 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
     st.caption(f"Целевая БД нагрузки (Target DB): {target_db}")
     st.dataframe(localized_df, width="stretch")
     if rows and all(row.get("status") != "up" for row in rows):
+        LOGGER.warning(
+            "No DB connections to any node. Errors: %s",
+            {row.get("node"): row.get("error") for row in rows},
+        )
         st.warning("Нет подключений к узлам БД. Проверьте доступность PostgreSQL и параметры DSN/SSH в конфиге.")
     stats = wg.stats_snapshot()
     st.info(f"Статус генератора нагрузки (Load generator status): {'🟢 РАБОТАЕТ' if wg.running else '🔴 ОСТАНОВЛЕН'}")
@@ -534,8 +570,11 @@ def main() -> None:
     try:
         cluster = load_cluster_config(cfg_path)
     except Exception as exc:
+        LOGGER.exception("Failed to parse config file: %s", cfg_path)
         st.error(f"Не удалось прочитать конфиг (Cannot parse config): {exc}")
         st.stop()
+
+    LOGGER.info("App started with config_path=%s nodes=%s", cfg_path, len(cluster.nodes))
 
     if "workload_generator" not in st.session_state:
         st.session_state.workload_generator = WorkloadGenerator()
