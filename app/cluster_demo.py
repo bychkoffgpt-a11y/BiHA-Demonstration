@@ -59,6 +59,7 @@ class WorkloadGenerator:
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
         self._stats: dict[str, int] = {"read_tx": 0, "write_tx": 0, "errors": 0}
+        self._recent_errors: list[dict[str, Any]] = []
 
     @property
     def running(self) -> bool:
@@ -72,6 +73,11 @@ class WorkloadGenerator:
         with self._lock:
             for key in self._stats:
                 self._stats[key] = 0
+            self._recent_errors = []
+
+    def recent_errors_snapshot(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return list(self._recent_errors)
 
     def start(self, cluster: ClusterConfig, mode: str, tps: int, read_ratio: float) -> None:
         if self.running:
@@ -99,6 +105,8 @@ class WorkloadGenerator:
         interval = 1.0 / tps if tps > 0 else 0.5
         next_tick = time.perf_counter()
         while not self._stop_event.is_set():
+            node: NodeConfig | None = None
+            write_tx = False
             try:
                 write_tx = random.random() > read_ratio
                 node = select_node_for_workload(cluster.nodes, mode, write_tx)
@@ -107,10 +115,30 @@ class WorkloadGenerator:
                 execute_workload_tx(node, write_tx)
                 with self._lock:
                     self._stats["write_tx" if write_tx else "read_tx"] += 1
-            except Exception:
-                LOGGER.exception("Workload worker transaction failed")
+            except Exception as exc:
+                error_message = format_workload_error(exc)
+                node_name = node.name if node else "unknown"
+                tx_type = "write" if write_tx else "read"
+                LOGGER.error(
+                    "Workload transaction failed | mode=%s node=%s role_hint=%s tx_type=%s error=%s",
+                    mode,
+                    node_name,
+                    node.role_hint if node else "unknown",
+                    tx_type,
+                    error_message,
+                )
                 with self._lock:
                     self._stats["errors"] += 1
+                    self._recent_errors.append(
+                        {
+                            "ts": pd.Timestamp.now(tz=MOSCOW_TZ),
+                            "node": node_name,
+                            "tx_type": tx_type,
+                            "error": error_message,
+                        }
+                    )
+                    if len(self._recent_errors) > 20:
+                        del self._recent_errors[:-20]
             next_tick += interval
             sleep_for = next_tick - time.perf_counter()
             if sleep_for > 0:
@@ -151,16 +179,16 @@ def select_node_for_workload(nodes: list[NodeConfig], mode: str, write_tx: bool)
 def execute_workload_tx(node: NodeConfig, write_tx: bool) -> None:
     with psycopg.connect(node.dsn, connect_timeout=2, autocommit=False) as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS biha_demo_load (
-                    id bigserial PRIMARY KEY,
-                    created_at timestamptz NOT NULL DEFAULT now(),
-                    payload text NOT NULL
-                )
-                """
-            )
             if write_tx:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS biha_demo_load (
+                        id bigserial PRIMARY KEY,
+                        created_at timestamptz NOT NULL DEFAULT now(),
+                        payload text NOT NULL
+                    )
+                    """
+                )
                 payload = f"demo-{time.time()}"
                 cur.execute("INSERT INTO biha_demo_load(payload) VALUES (%s) RETURNING id", (payload,))
                 row_id = cur.fetchone()[0]
@@ -170,15 +198,33 @@ def execute_workload_tx(node: NodeConfig, write_tx: bool) -> None:
                     (row_id,),
                 )
             else:
-                cur.execute(
-                    """
-                    SELECT id, payload, created_at
-                    FROM biha_demo_load
-                    ORDER BY id DESC
-                    LIMIT 100
-                    """
-                )
+                cur.execute("SELECT to_regclass('public.biha_demo_load')")
+                table_name = cur.fetchone()[0]
+                if table_name:
+                    cur.execute(
+                        """
+                        SELECT id, payload, created_at
+                        FROM biha_demo_load
+                        ORDER BY id DESC
+                        LIMIT 100
+                        """
+                    )
         conn.commit()
+
+
+def format_workload_error(exc: Exception) -> str:
+    sqlstate = getattr(exc, "sqlstate", None)
+    detail = getattr(getattr(exc, "diag", None), "message_detail", None)
+    hint = getattr(getattr(exc, "diag", None), "message_hint", None)
+
+    parts = [str(exc)]
+    if sqlstate:
+        parts.append(f"sqlstate={sqlstate}")
+    if detail:
+        parts.append(f"detail={detail}")
+    if hint:
+        parts.append(f"hint={hint}")
+    return " | ".join(parts)
 
 
 def extract_dbname_from_dsn(dsn: str) -> str:
@@ -239,6 +285,7 @@ def fetch_node_metrics(node: NodeConfig, target_db: str) -> dict[str, Any]:
         "blk_read_time_ms": None,
         "blk_write_time_ms": None,
         "disk_io_queue": None,
+        "tx_read_only": None,
         "error": None,
     }
 
@@ -269,7 +316,8 @@ def fetch_node_metrics(node: NodeConfig, target_db: str) -> dict[str, Any]:
                             SELECT count(*)
                             FROM pg_stat_activity
                             WHERE datname = %s AND wait_event_type = 'IO'
-                        )
+                        ),
+                        current_setting('transaction_read_only')
                     """,
                     (target_db, target_db, target_db, target_db, target_db, target_db, target_db, target_db, target_db, target_db, target_db),
                 )
@@ -291,6 +339,7 @@ def fetch_node_metrics(node: NodeConfig, target_db: str) -> dict[str, Any]:
                             "blk_read_time_ms": row[10],
                             "blk_write_time_ms": row[11],
                             "disk_io_queue": row[12],
+                            "tx_read_only": row[13],
                         }
                     )
     except Exception as exc:
@@ -334,6 +383,7 @@ def fetch_all_node_metrics(nodes: list[NodeConfig], target_db: str) -> list[dict
                     "blk_read_time_ms": None,
                     "blk_write_time_ms": None,
                     "disk_io_queue": None,
+                    "tx_read_only": None,
                     "error": str(exc),
                 }
 
@@ -571,6 +621,7 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
             "blk_read_time_ms": "Задержка чтения диска, мс (Disk read latency, ms)",
             "blk_write_time_ms": "Задержка записи диска, мс (Disk write latency, ms)",
             "disk_io_queue": "Очередь к диску (Disk queue)",
+            "tx_read_only": "Режим транзакции (Tx read-only)",
             "error": "Ошибка (Error)",
         }
     )
@@ -590,6 +641,11 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
     stat_cols[0].metric("Транзакции чтения", f"{stats['read_tx']:,}".replace(",", " "))
     stat_cols[1].metric("Транзакции записи", f"{stats['write_tx']:,}".replace(",", " "))
     stat_cols[2].metric("Ошибки", f"{stats['errors']:,}".replace(",", " "))
+
+    recent_errors = wg.recent_errors_snapshot()
+    if recent_errors:
+        st.caption("Последние ошибки генератора нагрузки (Recent load-generator errors)")
+        st.dataframe(pd.DataFrame(recent_errors), width="stretch", height=220)
 
     if "history" not in st.session_state:
         st.session_state.history = []
