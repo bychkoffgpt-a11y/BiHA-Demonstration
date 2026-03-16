@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlparse
 
 from zoneinfo import ZoneInfo
 
+import altair as alt
 import pandas as pd
 import psycopg
 from psycopg.conninfo import conninfo_to_dict
