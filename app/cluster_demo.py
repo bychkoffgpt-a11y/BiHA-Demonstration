@@ -16,6 +16,7 @@ import streamlit as st
 
 APP_TITLE = "BiHA PostgreSQL Cluster Demo"
 DEFAULT_HISTORY = 120
+MAX_WORKERS = 32
 
 
 @dataclass
@@ -39,14 +40,14 @@ class WorkloadGenerator:
     """Background thread that generates read/write load according to selected mode."""
 
     def __init__(self) -> None:
-        self._thread: threading.Thread | None = None
+        self._threads: list[threading.Thread] = []
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
         self._stats: dict[str, int] = {"read_tx": 0, "write_tx": 0, "errors": 0}
 
     @property
     def running(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
+        return any(thread.is_alive() for thread in self._threads)
 
     def stats_snapshot(self) -> dict[str, int]:
         with self._lock:
@@ -61,20 +62,27 @@ class WorkloadGenerator:
         if self.running:
             return
         self._stop_event.clear()
-        self._thread = threading.Thread(
-            target=self._run,
-            args=(cluster, mode, tps, read_ratio),
-            daemon=True,
-        )
-        self._thread.start()
+        workers = max(1, min(MAX_WORKERS, (tps // 1000) + 1))
+        per_worker_tps = tps / workers
+        self._threads = []
+        for _ in range(workers):
+            thread = threading.Thread(
+                target=self._run_worker,
+                args=(cluster, mode, per_worker_tps, read_ratio),
+                daemon=True,
+            )
+            self._threads.append(thread)
+            thread.start()
 
     def stop(self) -> None:
         self._stop_event.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2)
+        for thread in self._threads:
+            thread.join(timeout=2)
+        self._threads = []
 
-    def _run(self, cluster: ClusterConfig, mode: str, tps: int, read_ratio: float) -> None:
-        interval = max(0.05, 1.0 / max(tps, 1))
+    def _run_worker(self, cluster: ClusterConfig, mode: str, tps: float, read_ratio: float) -> None:
+        interval = 1.0 / tps if tps > 0 else 0.5
+        next_tick = time.perf_counter()
         while not self._stop_event.is_set():
             try:
                 write_tx = random.random() > read_ratio
@@ -87,7 +95,12 @@ class WorkloadGenerator:
             except Exception:
                 with self._lock:
                     self._stats["errors"] += 1
-            time.sleep(interval)
+            next_tick += interval
+            sleep_for = next_tick - time.perf_counter()
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+            else:
+                next_tick = time.perf_counter()
 
 
 def select_node_for_workload(nodes: list[NodeConfig], mode: str, write_tx: bool) -> NodeConfig | None:
@@ -151,6 +164,7 @@ def fetch_node_metrics(node: NodeConfig) -> dict[str, Any]:
         "blks_hit": None,
         "tup_returned": None,
         "tup_fetched": None,
+        "active_queries": None,
         "error": None,
     }
 
@@ -168,7 +182,8 @@ def fetch_node_metrics(node: NodeConfig) -> dict[str, Any]:
                         (SELECT blks_read FROM pg_stat_database WHERE datname = current_database()),
                         (SELECT blks_hit FROM pg_stat_database WHERE datname = current_database()),
                         (SELECT tup_returned FROM pg_stat_database WHERE datname = current_database()),
-                        (SELECT tup_fetched FROM pg_stat_database WHERE datname = current_database())
+                        (SELECT tup_fetched FROM pg_stat_database WHERE datname = current_database()),
+                        (SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND state = 'active')
                     """
                 )
                 row = cur.fetchone()
@@ -185,6 +200,7 @@ def fetch_node_metrics(node: NodeConfig) -> dict[str, Any]:
                             "blks_hit": row[6],
                             "tup_returned": row[7],
                             "tup_fetched": row[8],
+                            "active_queries": row[9],
                         }
                     )
     except Exception as exc:
@@ -215,64 +231,111 @@ def run_node_action(node: NodeConfig, action: str) -> tuple[bool, str]:
 
 
 def render_sidebar() -> dict[str, Any]:
-    st.sidebar.header("Load profile")
+    st.sidebar.header("Профиль нагрузки (Load profile)")
     mode = st.sidebar.selectbox(
-        "Mode",
+        "Режим (Mode)",
         options=["single-node", "dual-read", "master-rw-slave-r"],
         help="single-node: вся нагрузка на master; dual-read: чтение с обеих; master-rw-slave-r: запись на master, чтение с slave",
     )
-    tps = st.sidebar.slider("TPS", min_value=1, max_value=200, value=20)
-    read_ratio = st.sidebar.slider("Read ratio", 0.0, 1.0, 0.7, 0.05)
-    auto_refresh = st.sidebar.checkbox("Auto-refresh", value=True)
+    tps = st.sidebar.slider("TPS", min_value=0, max_value=50000, value=500, step=100)
+    read_ratio = st.sidebar.slider("Доля чтения (Read ratio)", 0.0, 1.0, 0.7, 0.05)
+    auto_refresh = st.sidebar.checkbox("Автообновление (Auto-refresh)", value=True)
     return {"mode": mode, "tps": tps, "read_ratio": read_ratio, "auto_refresh": auto_refresh}
 
 
 def render_controls(cluster: ClusterConfig, wg: WorkloadGenerator, profile: dict[str, Any]) -> None:
-    st.subheader("Scenario controls")
-    col1, col2, col3, col4 = st.columns(4)
+    st.subheader("Управление сценарием (Scenario controls)")
+    col1, col2, col3, col4, col5 = st.columns(5)
 
-    if col1.button("Start load", type="primary", use_container_width=True):
+    if col1.button("Запустить нагрузку (Start load)", type="primary", use_container_width=True):
         wg.start(cluster, profile["mode"], int(profile["tps"]), float(profile["read_ratio"]))
-    if col2.button("Stop load", use_container_width=True):
+    if col2.button("Остановить нагрузку (Stop load)", use_container_width=True):
         wg.stop()
-    if col3.button("Reset counters", use_container_width=True):
+    if col3.button("Сбросить счётчики (Reset counters)", use_container_width=True):
         wg.reset_stats()
-    if col4.button("Refresh now", use_container_width=True):
+    if col4.button("Сбросить серверную статистику (Reset server stats)", use_container_width=True):
+        reset_server_stats(cluster)
+    if col5.button("Обновить сейчас (Refresh now)", use_container_width=True):
         st.rerun()
 
-    st.caption(f"Generator state: {'RUNNING' if wg.running else 'STOPPED'}")
-    st.markdown("#### Failure simulation")
+    st.caption(f"Состояние генератора (Generator state): {'RUNNING' if wg.running else 'STOPPED'}")
+    st.markdown("#### Симуляция отказа (Failure simulation)")
 
     for node in cluster.nodes:
         c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
         c1.write(f"**{node.name}** ({node.role_hint})")
-        if c2.button(f"Stop {node.name}", key=f"stop-{node.name}"):
+        if c2.button(f"Остановить (Stop) {node.name}", key=f"stop-{node.name}"):
             ok, msg = run_node_action(node, "stop")
             st.toast(f"{node.name} stop: {'OK' if ok else 'ERR'} | {msg}")
-        if c3.button(f"Start {node.name}", key=f"start-{node.name}"):
+        if c3.button(f"Запустить (Start) {node.name}", key=f"start-{node.name}"):
             ok, msg = run_node_action(node, "start")
             st.toast(f"{node.name} start: {'OK' if ok else 'ERR'} | {msg}")
-        if c4.button(f"Restart {node.name}", key=f"restart-{node.name}"):
+        if c4.button(f"Перезапустить (Restart) {node.name}", key=f"restart-{node.name}"):
             ok, msg = run_node_action(node, "restart")
             st.toast(f"{node.name} restart: {'OK' if ok else 'ERR'} | {msg}")
 
 
+def reset_server_stats(cluster: ClusterConfig) -> None:
+    failures: list[str] = []
+    for node in cluster.nodes:
+        try:
+            with psycopg.connect(node.dsn, connect_timeout=2, autocommit=True) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT pg_stat_reset()")
+        except Exception as exc:
+            failures.append(f"{node.name}: {exc}")
+
+    if failures:
+        st.warning("Не удалось сбросить статистику (Failed to reset stats): " + "; ".join(failures))
+    else:
+        st.success("Серверная статистика сброшена (Server statistics reset).")
+
+
 def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
-    st.subheader("Cluster state")
+    st.subheader("Состояние кластера (Cluster state)")
     rows = [fetch_node_metrics(node) for node in cluster.nodes]
     df = pd.DataFrame(rows)
-    st.dataframe(df, use_container_width=True)
+    localized_df = df.rename(
+        columns={
+            "node": "Узел (Node)",
+            "status": "Статус (Status)",
+            "role": "Роль (Role)",
+            "replay_delay_sec": "Задержка реплея, с (Replay delay, sec)",
+            "active_locks": "Активные блокировки (Active locks)",
+            "active_queries": "Активные запросы (Active queries)",
+            "xact_commit": "Подтверждённые транзакции (Committed tx)",
+            "xact_rollback": "Откаты транзакций (Rolled back tx)",
+            "blks_read": "Блоков с диска (Blocks read)",
+            "blks_hit": "Попаданий в кэш (Cache hits)",
+            "tup_returned": "Возвращено строк (Rows returned)",
+            "tup_fetched": "Извлечено строк (Rows fetched)",
+            "error": "Ошибка (Error)",
+        }
+    )
+    st.dataframe(localized_df, use_container_width=True)
+
+    st.markdown("##### Состояние узлов (Node health)")
+    health_cols = st.columns(max(len(rows), 1))
+    for idx, row in enumerate(rows):
+        up = row["status"] == "up"
+        color = "#1f9d55" if up else "#dc2626"
+        text = "РАБОТАЕТ (UP)" if up else "НЕ РАБОТАЕТ (DOWN)"
+        health_cols[idx].markdown(
+            f"<div style='padding:10px;border-radius:8px;background:{color};color:white;text-align:center;'>"
+            f"<b>{row['node']}</b><br>{text}</div>",
+            unsafe_allow_html=True,
+        )
 
     summary_cols = st.columns(4)
     up_nodes = int((df["status"] == "up").sum()) if not df.empty else 0
-    summary_cols[0].metric("Nodes UP", up_nodes)
-    summary_cols[1].metric("Master", ", ".join(df[df["role"] == "master"]["node"].tolist()) or "-")
-    summary_cols[2].metric("Slave", ", ".join(df[df["role"] == "slave"]["node"].tolist()) or "-")
+    summary_cols[0].metric("Узлов в работе (Nodes UP)", up_nodes)
+    summary_cols[1].metric("Мастер (Master)", ", ".join(df[df["role"] == "master"]["node"].tolist()) or "-")
+    summary_cols[2].metric("Реплика (Slave)", ", ".join(df[df["role"] == "slave"]["node"].tolist()) or "-")
 
     stats = wg.stats_snapshot()
-    summary_cols[3].metric("Generator errors", stats["errors"])
+    summary_cols[3].metric("Ошибки генератора (Generator errors)", stats["errors"])
 
-    st.subheader("Load stats")
+    st.subheader("Статистика нагрузки (Load stats)")
     st.json(stats)
 
     if "history" not in st.session_state:
@@ -286,7 +349,8 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
             "write_tx": stats["write_tx"],
             "errors": stats["errors"],
             "active_locks": int(df["active_locks"].fillna(0).sum()) if not df.empty else 0,
-            "blks_read": int(df["blks_read"].fillna(0).sum()) if not df.empty else 0,
+            "active_queries": int(df["active_queries"].fillna(0).sum()) if not df.empty else 0,
+            **{f"blks_read_{row['node']}": int(row.get("blks_read") or 0) for row in rows},
         }
     )
 
@@ -296,23 +360,29 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
     hist_df = pd.DataFrame(history)
     if not hist_df.empty:
         st.line_chart(hist_df.set_index("ts")[["read_tx", "write_tx", "errors"]])
-        st.line_chart(hist_df.set_index("ts")[["active_locks", "blks_read"]])
+        st.line_chart(hist_df.set_index("ts")[["active_locks", "active_queries"]])
+
+        st.markdown("##### Нагрузка на диски по узлам (Disk load per node)")
+        disk_cols = [f"blks_read_{node.name}" for node in cluster.nodes if f"blks_read_{node.name}" in hist_df.columns]
+        graph_cols = st.columns(max(len(disk_cols), 1))
+        for idx, col_name in enumerate(disk_cols):
+            graph_cols[idx].line_chart(hist_df.set_index("ts")[[col_name]])
 
 
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
-    st.caption("Demo GUI for BiHA PostgreSQL Pro cluster validation")
+    st.caption("Демо-интерфейс для проверки кластера BiHA PostgreSQL Pro (Demo GUI for BiHA PostgreSQL Pro cluster validation)")
 
-    cfg_path = Path(st.text_input("Path to config", "config/cluster.example.json"))
+    cfg_path = Path(st.text_input("Путь к конфигу (Path to config)", "config/cluster.example.json"))
     if not cfg_path.exists():
-        st.error(f"Config not found: {cfg_path}")
+        st.error(f"Конфиг не найден (Config not found): {cfg_path}")
         st.stop()
 
     try:
         cluster = load_cluster_config(cfg_path)
     except Exception as exc:
-        st.error(f"Cannot parse config: {exc}")
+        st.error(f"Не удалось прочитать конфиг (Cannot parse config): {exc}")
         st.stop()
 
     if "workload_generator" not in st.session_state:
