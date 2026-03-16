@@ -415,6 +415,54 @@ def render_sidebar() -> dict[str, Any]:
     return {"mode": mode, "tps": tps, "read_ratio": read_ratio, "auto_refresh": auto_refresh}
 
 
+def apply_compact_top_styles() -> None:
+    st.markdown(
+        """
+        <style>
+            div.block-container {
+                padding-top: 1.2rem;
+            }
+
+            h1 {
+                font-size: 2.2rem !important;
+                margin-bottom: 0.1rem !important;
+            }
+
+            h3 {
+                font-size: 2rem !important;
+                margin-top: 0.8rem !important;
+                margin-bottom: 0.4rem !important;
+            }
+
+            .stCaption {
+                font-size: 0.9rem !important;
+                margin-bottom: 0.2rem !important;
+            }
+
+            div[data-testid="stTextInput"] label p,
+            div[data-testid="stSlider"] label p,
+            div[data-testid="stSelectbox"] label p,
+            div[data-testid="stCheckbox"] label p {
+                font-size: 0.92rem !important;
+            }
+
+            div[data-testid="stTextInput"] input {
+                font-size: 0.95rem !important;
+                padding-top: 0.35rem !important;
+                padding-bottom: 0.35rem !important;
+            }
+
+            div[data-testid="stButton"] button {
+                font-size: 0.92rem !important;
+                min-height: 2.2rem !important;
+                padding: 0.3rem 0.6rem !important;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_controls(cluster: ClusterConfig, wg: WorkloadGenerator, profile: dict[str, Any]) -> None:
     st.subheader("Управление сценарием (Scenario controls)")
     col1, col2, col3, col4, col5 = st.columns(5)
@@ -559,6 +607,7 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
 
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide")
+    apply_compact_top_styles()
     st.title(APP_TITLE)
     st.caption("Демо-интерфейс для проверки кластера BiHA PostgreSQL Pro (Demo GUI for BiHA PostgreSQL Pro cluster validation)")
 
