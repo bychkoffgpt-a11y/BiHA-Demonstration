@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlparse
 
 from zoneinfo import ZoneInfo
 
+import altair as alt
 import pandas as pd
 import psycopg
 from psycopg.conninfo import conninfo_to_dict
@@ -597,7 +598,20 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
 
     hist_df = pd.DataFrame(history)
     if not hist_df.empty:
-        st.line_chart(hist_df.set_index("ts")[["read_tx", "write_tx", "errors"]])
+        load_df = hist_df[["ts", "read_tx", "write_tx", "errors"]].copy()
+        load_df["ts"] = pd.to_datetime(load_df["ts"]).dt.tz_convert(MOSCOW_TZ).dt.tz_localize(None)
+        load_df = load_df.melt(id_vars="ts", var_name="metric", value_name="value")
+        load_chart = (
+            alt.Chart(load_df)
+            .mark_line()
+            .encode(
+                x=alt.X("ts:T", title="Время (МСК)", axis=alt.Axis(format="%H:%M:%S")),
+                y=alt.Y("value:Q", title="Значение"),
+                color=alt.Color("metric:N", title="Метрика"),
+            )
+            .properties(height=360)
+        )
+        st.altair_chart(load_chart, width="stretch")
         st.line_chart(hist_df.set_index("ts")[["active_locks", "active_queries"]])
 
         st.markdown("##### Нагрузка на диски по узлам (Disk load per node)")
