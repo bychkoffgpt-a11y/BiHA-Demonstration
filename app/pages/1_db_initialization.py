@@ -1,0 +1,102 @@
+from __future__ import annotations
+
+import threading
+import time
+from pathlib import Path
+
+import streamlit as st
+
+from cluster_demo import load_cluster_config, select_node_for_workload
+from workload_profiles import initialize_pg_like_dataset
+
+st.set_page_config(page_title="Инициализация БД", layout="wide")
+st.title("Инициализация и наполнение БД (pgbench-like)")
+st.caption("Создание схемы и генерация данных по целевому размеру БД в ГБ.")
+
+if "db_init_state" not in st.session_state:
+    st.session_state.db_init_state = {
+        "running": False,
+        "progress": 0.0,
+        "stage": "Ожидание",
+        "eta_sec": None,
+        "started_at": None,
+        "error": None,
+        "result": None,
+    }
+
+state = st.session_state.db_init_state
+
+cfg_path = Path(st.text_input("Путь к конфигу (Path to config)", "config/cluster.json"))
+mode = st.selectbox(
+    "Режим нагрузки для выбора целевой БД",
+    options=["single-node", "dual-read", "master-rw-slave-r"],
+    index=0,
+)
+target_size_gb = st.number_input("Целевой размер БД, ГБ", min_value=0.1, max_value=500.0, value=1.0, step=0.1)
+
+try:
+    cluster = load_cluster_config(cfg_path)
+except Exception as exc:
+    st.error(f"Не удалось прочитать конфиг: {exc}")
+    st.stop()
+
+node = select_node_for_workload(cluster.nodes, mode, write_tx=True)
+if not node:
+    st.warning("В конфиге нет узлов")
+    st.stop()
+
+st.info(f"Целевая нода для инициализации: {node.name}")
+
+
+def run_init() -> None:
+    state["running"] = True
+    state["progress"] = 0.0
+    state["stage"] = "Запуск"
+    state["eta_sec"] = None
+    state["started_at"] = time.time()
+    state["error"] = None
+    state["result"] = None
+
+    def cb(progress: float, stage: str, eta_sec: float | None) -> None:
+        state["progress"] = max(0.0, min(1.0, progress))
+        state["stage"] = stage
+        state["eta_sec"] = eta_sec
+
+    try:
+        result = initialize_pg_like_dataset(node.dsn, float(target_size_gb), progress_cb=cb)
+        state["result"] = result
+    except Exception as exc:
+        state["error"] = str(exc)
+    finally:
+        state["running"] = False
+
+
+if st.button("Старт создания/наполнения БД", type="primary", disabled=state["running"]):
+    threading.Thread(target=run_init, daemon=True).start()
+    st.rerun()
+
+if state["running"]:
+    st.progress(float(state["progress"]), text=f"{state['stage']}")
+    eta = state.get("eta_sec")
+    if eta is not None:
+        st.caption(f"Осталось примерно: {int(max(0, eta))} сек")
+    st.caption("Процесс выполняется...")
+    time.sleep(1)
+    st.rerun()
+else:
+    st.progress(float(state["progress"]), text=f"{state['stage']}")
+
+if state.get("error"):
+    st.error(f"Ошибка: {state['error']}")
+
+if state.get("result"):
+    sizing = state["result"]
+    st.success("Инициализация завершена")
+    st.json(
+        {
+            "branch_count": sizing.branch_count,
+            "teller_count": sizing.teller_count,
+            "account_count": sizing.account_count,
+            "target_size_gb": sizing.target_size_gb,
+        }
+    )

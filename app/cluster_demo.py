@@ -21,10 +21,11 @@ from psycopg.conninfo import conninfo_to_dict
 import streamlit as st
 
 from logging_utils import setup_file_logger
+from workload_profiles import PgLikeSizing, estimate_pg_like_sizing, run_pg_like_tx
 
 APP_TITLE = "BiHA PostgreSQL Cluster Demo"
 DEFAULT_HISTORY = 120
-MAX_WORKERS = 32
+MAX_WORKERS = 64
 METRICS_FETCH_WORKERS = 8
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 LOGGER = setup_file_logger()
@@ -52,7 +53,7 @@ class ClusterConfig:
 
 
 class WorkloadGenerator:
-    """Background thread that generates read/write load according to selected mode."""
+    """Background session workers generating pgbench-like read/write load."""
 
     def __init__(self) -> None:
         self._threads: list[threading.Thread] = []
@@ -79,17 +80,17 @@ class WorkloadGenerator:
         with self._lock:
             return list(self._recent_errors)
 
-    def start(self, cluster: ClusterConfig, mode: str, tps: int, read_ratio: float) -> None:
+    def start(self, cluster: ClusterConfig, mode: str, sessions: int, read_ratio: float) -> None:
         if self.running:
             return
         self._stop_event.clear()
-        workers = max(1, min(MAX_WORKERS, (tps // 1000) + 1))
-        per_worker_tps = tps / workers
+        workers = max(1, min(MAX_WORKERS, sessions))
+        sizing = estimate_pg_like_sizing(float(st.session_state.get("target_size_gb", 0.1)))
         self._threads = []
         for _ in range(workers):
             thread = threading.Thread(
                 target=self._run_worker,
-                args=(cluster, mode, per_worker_tps, read_ratio),
+                args=(cluster, mode, read_ratio, sizing),
                 daemon=True,
             )
             self._threads.append(thread)
@@ -101,9 +102,7 @@ class WorkloadGenerator:
             thread.join(timeout=2)
         self._threads = []
 
-    def _run_worker(self, cluster: ClusterConfig, mode: str, tps: float, read_ratio: float) -> None:
-        interval = 1.0 / tps if tps > 0 else 0.5
-        next_tick = time.perf_counter()
+    def _run_worker(self, cluster: ClusterConfig, mode: str, read_ratio: float, sizing: PgLikeSizing) -> None:
         while not self._stop_event.is_set():
             node: NodeConfig | None = None
             write_tx = False
@@ -112,7 +111,7 @@ class WorkloadGenerator:
                 node = select_node_for_workload(cluster.nodes, mode, write_tx)
                 if not node:
                     raise RuntimeError("No available node for selected mode")
-                execute_workload_tx(node, write_tx)
+                execute_workload_tx(node, write_tx, sizing)
                 with self._lock:
                     self._stats["write_tx" if write_tx else "read_tx"] += 1
             except Exception as exc:
@@ -139,12 +138,7 @@ class WorkloadGenerator:
                     )
                     if len(self._recent_errors) > 20:
                         del self._recent_errors[:-20]
-            next_tick += interval
-            sleep_for = next_tick - time.perf_counter()
-            if sleep_for > 0:
-                time.sleep(sleep_for)
-            else:
-                next_tick = time.perf_counter()
+            time.sleep(0.001)
 
 
 def select_node_for_workload(nodes: list[NodeConfig], mode: str, write_tx: bool) -> NodeConfig | None:
@@ -176,39 +170,9 @@ def select_node_for_workload(nodes: list[NodeConfig], mode: str, write_tx: bool)
     return fallback_node
 
 
-def execute_workload_tx(node: NodeConfig, write_tx: bool) -> None:
+def execute_workload_tx(node: NodeConfig, write_tx: bool, sizing: PgLikeSizing) -> None:
     with psycopg.connect(node.dsn, connect_timeout=2, autocommit=False) as conn:
-        with conn.cursor() as cur:
-            if write_tx:
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS biha_demo_load (
-                        id bigserial PRIMARY KEY,
-                        created_at timestamptz NOT NULL DEFAULT now(),
-                        payload text NOT NULL
-                    )
-                    """
-                )
-                payload = f"demo-{time.time()}"
-                cur.execute("INSERT INTO biha_demo_load(payload) VALUES (%s) RETURNING id", (payload,))
-                row_id = cur.fetchone()[0]
-                cur.execute("SELECT id, payload, created_at FROM biha_demo_load WHERE id = %s", (row_id,))
-                cur.execute(
-                    "UPDATE biha_demo_load SET payload = payload || '-updated' WHERE id = %s",
-                    (row_id,),
-                )
-            else:
-                cur.execute("SELECT to_regclass('public.biha_demo_load')")
-                table_name = cur.fetchone()[0]
-                if table_name:
-                    cur.execute(
-                        """
-                        SELECT id, payload, created_at
-                        FROM biha_demo_load
-                        ORDER BY id DESC
-                        LIMIT 100
-                        """
-                    )
+        run_pg_like_tx(conn, write_tx, sizing)
         conn.commit()
 
 
@@ -469,11 +433,19 @@ def render_sidebar() -> dict[str, Any]:
         options=["single-node", "dual-read", "master-rw-slave-r"],
         help="single-node: вся нагрузка на master; dual-read: чтение с обеих; master-rw-slave-r: запись на master, чтение с slave",
     )
-    tps = st.sidebar.slider("TPS", min_value=0, max_value=50000, value=500, step=100)
+    sessions = st.sidebar.slider("Клиентские сессии (Client sessions)", min_value=1, max_value=200, value=10, step=1)
     read_ratio = st.sidebar.slider("Доля чтения (Read ratio)", 0.0, 1.0, 0.7, 0.05)
+    target_size_gb = st.sidebar.number_input(
+        "Ожидаемый размер БД, ГБ (Expected DB size, GB)",
+        min_value=0.1,
+        max_value=500.0,
+        value=float(st.session_state.get("target_size_gb", 1.0)),
+        step=0.1,
+    )
     auto_refresh = st.sidebar.checkbox("Автообновление (Auto-refresh)", value=True)
     st.session_state.load_mode = mode
-    return {"mode": mode, "tps": tps, "read_ratio": read_ratio, "auto_refresh": auto_refresh}
+    st.session_state.target_size_gb = float(target_size_gb)
+    return {"mode": mode, "sessions": sessions, "read_ratio": read_ratio, "auto_refresh": auto_refresh}
 
 
 def apply_compact_top_styles() -> None:
@@ -548,7 +520,7 @@ def render_controls(cluster: ClusterConfig, wg: WorkloadGenerator, profile: dict
     col1, col2, col3, col4, col5 = st.columns(5)
 
     if col1.button("Запустить нагрузку (Start load)", type="primary", width="stretch"):
-        wg.start(cluster, profile["mode"], int(profile["tps"]), float(profile["read_ratio"]))
+        wg.start(cluster, profile["mode"], int(profile["sessions"]), float(profile["read_ratio"]))
     if col2.button("Остановить нагрузку (Stop load)", width="stretch"):
         wg.stop()
     if col3.button("Сбросить счётчики (Reset counters)", width="stretch"):

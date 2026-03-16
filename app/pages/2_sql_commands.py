@@ -1,38 +1,27 @@
 import streamlit as st
 
+from workload_profiles import (
+    PG_LIKE_FILL_ACCOUNTS_SQL,
+    PG_LIKE_FILL_BRANCHES_SQL,
+    PG_LIKE_FILL_TELLERS_SQL,
+    PG_LIKE_READ_SQL,
+    PG_LIKE_SCHEMA_SQL,
+    PG_LIKE_TRUNCATE_SQL,
+    PG_LIKE_WRITE_SQL,
+)
+
 st.set_page_config(page_title="SQL команды нагрузки", layout="wide")
-st.title("SQL команды нагрузки (SQL load commands)")
-st.caption("Информационная страница со списком SQL, который выполняет генератор нагрузки (Informational page with SQL executed by the load generator).")
+st.title("SQL команды инициализации и нагрузки")
+st.caption("Все SQL-скрипты, используемые приложением для подготовки базы и генерации нагрузки.")
 
 commands = {
-    "Подготовка таблицы (Table setup)": """
-CREATE TABLE IF NOT EXISTS biha_demo_load (
-    id bigserial PRIMARY KEY,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    payload text NOT NULL
-);
-""",
-    "Транзакция чтения (Read transaction)": """
-SELECT id, payload, created_at
-FROM biha_demo_load
-ORDER BY id DESC
-LIMIT 100;
-""",
-    "Транзакция чтения-записи (Read-write transaction, 3 commands)": """
-BEGIN;
-INSERT INTO biha_demo_load(payload)
-VALUES ('demo-<timestamp>')
-RETURNING id;
-
-SELECT id, payload, created_at
-FROM biha_demo_load
-WHERE id = <id_from_insert>;
-
-UPDATE biha_demo_load
-SET payload = payload || '-updated'
-WHERE id = <id_from_insert>;
-COMMIT;
-""",
+    "1) Создание схемы pgbench-like": PG_LIKE_SCHEMA_SQL,
+    "2) Очистка таблиц": PG_LIKE_TRUNCATE_SQL,
+    "3) Наполнение branches": PG_LIKE_FILL_BRANCHES_SQL,
+    "4) Наполнение tellers": PG_LIKE_FILL_TELLERS_SQL,
+    "5) Наполнение accounts": PG_LIKE_FILL_ACCOUNTS_SQL,
+    "6) Транзакция чтения": PG_LIKE_READ_SQL,
+    "7) Транзакция чтение-запись": PG_LIKE_WRITE_SQL,
 }
 
 for title, sql in commands.items():
