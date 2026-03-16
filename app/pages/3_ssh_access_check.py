@@ -19,6 +19,10 @@ class NodeConfig:
     control_via_ssh: bool = False
     ssh_host: str | None = None
     ssh_user: str | None = None
+    ssh_port: int = 22
+    ssh_identity_file: str | None = None
+    ssh_extra_options: list[str] | None = None
+    ssh_legacy_algorithms: bool = False
     service_name: str = "postgrespro"
 
 
@@ -43,10 +47,33 @@ def run_ssh_check(node: NodeConfig, command: str, timeout_sec: int = 10) -> tupl
         "-o",
         "BatchMode=yes",
         "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
         "ConnectTimeout=5",
-        f"{user_prefix}{node.ssh_host}",
-        command,
+        "-p",
+        str(node.ssh_port),
     ]
+
+    if node.ssh_identity_file:
+        cmd.extend(["-i", node.ssh_identity_file])
+
+    if node.ssh_legacy_algorithms:
+        cmd.extend(
+            [
+                "-o",
+                "HostKeyAlgorithms=+ssh-rsa",
+                "-o",
+                "PubkeyAcceptedAlgorithms=+ssh-rsa",
+                "-o",
+                "KexAlgorithms=+diffie-hellman-group14-sha1",
+            ]
+        )
+
+    if node.ssh_extra_options:
+        for opt in node.ssh_extra_options:
+            cmd.extend(["-o", opt])
+
+    cmd.extend([f"{user_prefix}{node.ssh_host}", command])
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
     except subprocess.TimeoutExpired:
@@ -62,7 +89,8 @@ def available_checks(node: NodeConfig) -> dict[str, str]:
         "SSH handshake (whoami)": "whoami",
         "Passwordless sudo": "sudo -n true",
         "Service control rights (systemctl status)": f"sudo -n systemctl status {service} --no-pager --lines=0",
-        "Firewall management tool availability": "sudo -n bash -lc 'command -v firewall-cmd || command -v ufw || command -v iptables'",
+        "Firewall management tool availability": "sudo -n bash -lc 'command -v firewall-cmd || command -v ufw || command -v nft || command -v iptables'",
+        "sshd configuration check": "sudo -n sshd -T | egrep \"^(passwordauthentication|pubkeyauthentication|permitrootlogin|kexalgorithms|hostkeyalgorithms)\"",
     }
 
 

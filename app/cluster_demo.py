@@ -31,6 +31,10 @@ class NodeConfig:
     control_via_ssh: bool = False
     ssh_host: str | None = None
     ssh_user: str | None = None
+    ssh_port: int = 22
+    ssh_identity_file: str | None = None
+    ssh_extra_options: list[str] | None = None
+    ssh_legacy_algorithms: bool = False
     service_name: str = "postgrespro"
 
 
@@ -290,9 +294,35 @@ def run_node_action(node: NodeConfig, action: str) -> tuple[bool, str]:
         "StrictHostKeyChecking=accept-new",
         "-o",
         "ConnectTimeout=5",
-        f"{user_prefix}{node.ssh_host}",
-        remote_cmd,
+        "-p",
+        str(node.ssh_port),
     ]
+
+    if node.ssh_identity_file:
+        cmd.extend(["-i", node.ssh_identity_file])
+
+    if node.ssh_legacy_algorithms:
+        cmd.extend(
+            [
+                "-o",
+                "HostKeyAlgorithms=+ssh-rsa",
+                "-o",
+                "PubkeyAcceptedAlgorithms=+ssh-rsa",
+                "-o",
+                "KexAlgorithms=+diffie-hellman-group14-sha1",
+            ]
+        )
+
+    if node.ssh_extra_options:
+        for opt in node.ssh_extra_options:
+            cmd.extend(["-o", opt])
+
+    cmd.extend(
+        [
+            f"{user_prefix}{node.ssh_host}",
+            remote_cmd,
+        ]
+    )
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
     except subprocess.TimeoutExpired:
