@@ -194,6 +194,139 @@ ssh -vvv -o BatchMode=yes -o ConnectTimeout=5 -i ~/.ssh/id_ed25519 postgres@10.1
 
 ---
 
+## Разбор ошибки при логине на узлы кластера
+
+Если вы видите одновременно:
+
+- `Warning: Identity file /home/appuser/.ssh/id_ed25519 not accessible: No such file or directory`
+- `sudo: a password is required`
+
+это значит, что есть **две отдельные проблемы**: не найден SSH-ключ и не настроен `sudo` без пароля.
+
+### Шаг 1. Исправьте путь к SSH-ключу
+
+На хосте, где запускается Streamlit:
+
+1. Проверьте пользователя процесса:
+
+```bash
+whoami
+ps -ef | egrep 'streamlit|cluster_demo' | grep -v grep
+```
+
+2. Проверьте, существует ли ключ:
+
+```bash
+ls -la /home/appuser/.ssh
+ls -la /home/appuser/.ssh/id_ed25519 /home/appuser/.ssh/id_ed25519.pub
+```
+
+3. Если ключа нет — создайте его от имени нужного пользователя:
+
+```bash
+sudo -u appuser ssh-keygen -t ed25519 -f /home/appuser/.ssh/id_ed25519 -N '' -C 'biha-demo'
+```
+
+4. Выставьте корректные права:
+
+```bash
+sudo chown -R appuser:appuser /home/appuser/.ssh
+sudo chmod 700 /home/appuser/.ssh
+sudo chmod 600 /home/appuser/.ssh/id_ed25519
+sudo chmod 644 /home/appuser/.ssh/id_ed25519.pub
+```
+
+5. Пропишите актуальный путь в `config/cluster.json` (поле `ssh_identity_file`) и убедитесь, что этот путь виден именно пользователю процесса приложения.
+
+### Шаг 2. Добавьте публичный ключ на каждый узел БД
+
+На хосте приложения:
+
+```bash
+ssh-copy-id -i /home/appuser/.ssh/id_ed25519.pub postgres@10.10.10.11
+ssh-copy-id -i /home/appuser/.ssh/id_ed25519.pub postgres@10.10.10.12
+```
+
+Либо вручную добавьте содержимое `id_ed25519.pub` в `~postgres/.ssh/authorized_keys` на целевых узлах.
+
+Права на узле должны быть такими:
+
+```bash
+chmod 700 ~/.ssh
+chmod 600 ~/.ssh/authorized_keys
+```
+
+### Шаг 3. Настройте `sudo` без пароля для управления PostgreSQL
+
+Ошибка `sudo: a password is required` возникает, когда приложение по SSH выполняет `sudo systemctl ...`, а удалённый пользователь не имеет `NOPASSWD`-прав.
+
+На **каждом узле кластера** выполните:
+
+```bash
+sudo visudo -f /etc/sudoers.d/postgres-service
+```
+
+Добавьте правило (адаптируйте пользователя и имя сервиса):
+
+```sudoers
+postgres ALL=(root) NOPASSWD: /bin/systemctl start postgrespro, /bin/systemctl stop postgrespro, /bin/systemctl restart postgrespro, /bin/systemctl status postgrespro
+```
+
+> Рекомендуется ограничивать права только нужными командами `systemctl`, а не давать полный `NOPASSWD: ALL`.
+
+Проверьте:
+
+```bash
+sudo -l -U postgres
+ssh -i /home/appuser/.ssh/id_ed25519 postgres@10.10.10.11 'sudo -n systemctl status postgrespro --no-pager | head -n 5'
+```
+
+Ключевой момент: используйте `sudo -n` для безпарольной автоматизации. Если права не настроены, команда сразу вернёт ошибку.
+
+### Шаг 4. Проверьте конфигурацию приложения
+
+Фрагмент узла в `config/cluster.json`:
+
+```json
+{
+  "name": "node1-master",
+  "control_via_ssh": true,
+  "ssh_host": "10.10.10.11",
+  "ssh_user": "postgres",
+  "ssh_port": 22,
+  "ssh_identity_file": "/home/appuser/.ssh/id_ed25519",
+  "service_name": "postgrespro"
+}
+```
+
+Если на узле устаревшие алгоритмы SSH, дополнительно:
+
+```json
+"ssh_legacy_algorithms": true
+```
+
+### Шаг 5. Диагностика (обязательно выполнить)
+
+С хоста приложения:
+
+```bash
+ssh -vvv -o BatchMode=yes -o ConnectTimeout=5 -i /home/appuser/.ssh/id_ed25519 postgres@10.10.10.11 whoami
+ssh -vvv -o BatchMode=yes -o ConnectTimeout=5 -i /home/appuser/.ssh/id_ed25519 postgres@10.10.10.11 'sudo -n systemctl restart postgrespro'
+```
+
+Если первая команда не проходит — проблема в SSH/ключах.
+Если первая проходит, а вторая нет — проблема в `sudoers`.
+
+### Краткий чек-лист
+
+- [ ] Файл `/home/appuser/.ssh/id_ed25519` существует.
+- [ ] Права на `.ssh` и ключи выставлены корректно.
+- [ ] Публичный ключ добавлен на все целевые узлы.
+- [ ] В `config/cluster.json` указан правильный `ssh_identity_file`.
+- [ ] На узлах настроен `NOPASSWD` для нужных `systemctl`-команд.
+- [ ] Ручные проверки `ssh ... whoami` и `ssh ... 'sudo -n systemctl ...'` успешны.
+
+
 ## Важное уточнение
 
 Предыдущая версия README ошибочно описывала Kubernetes/Grafana-стек как обязательный.
