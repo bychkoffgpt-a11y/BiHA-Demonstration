@@ -247,15 +247,15 @@ def render_controls(cluster: ClusterConfig, wg: WorkloadGenerator, profile: dict
     st.subheader("Управление сценарием (Scenario controls)")
     col1, col2, col3, col4, col5 = st.columns(5)
 
-    if col1.button("Запустить нагрузку (Start load)", type="primary", use_container_width=True):
+    if col1.button("Запустить нагрузку (Start load)", type="primary", width="stretch"):
         wg.start(cluster, profile["mode"], int(profile["tps"]), float(profile["read_ratio"]))
-    if col2.button("Остановить нагрузку (Stop load)", use_container_width=True):
+    if col2.button("Остановить нагрузку (Stop load)", width="stretch"):
         wg.stop()
-    if col3.button("Сбросить счётчики (Reset counters)", use_container_width=True):
+    if col3.button("Сбросить счётчики (Reset counters)", width="stretch"):
         wg.reset_stats()
-    if col4.button("Сбросить серверную статистику (Reset server stats)", use_container_width=True):
+    if col4.button("Сбросить серверную статистику (Reset server stats)", width="stretch"):
         reset_server_stats(cluster)
-    if col5.button("Обновить сейчас (Refresh now)", use_container_width=True):
+    if col5.button("Обновить сейчас (Refresh now)", width="stretch"):
         st.rerun()
 
     st.caption(f"Состояние генератора (Generator state): {'RUNNING' if wg.running else 'STOPPED'}")
@@ -312,7 +312,7 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
             "error": "Ошибка (Error)",
         }
     )
-    st.dataframe(localized_df, use_container_width=True)
+    st.dataframe(localized_df, width="stretch")
 
     st.markdown("##### Состояние узлов (Node health)")
     health_cols = st.columns(max(len(rows), 1))
