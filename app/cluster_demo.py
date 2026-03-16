@@ -274,16 +274,27 @@ def run_node_action(node: NodeConfig, action: str) -> tuple[bool, str]:
 
     user_prefix = f"{node.ssh_user}@" if node.ssh_user else ""
     if action == "stop":
-        remote_cmd = f"sudo systemctl stop {shlex.quote(node.service_name)}"
+        remote_cmd = f"sudo -n systemctl stop {shlex.quote(node.service_name)}"
     elif action == "start":
-        remote_cmd = f"sudo systemctl start {shlex.quote(node.service_name)}"
+        remote_cmd = f"sudo -n systemctl start {shlex.quote(node.service_name)}"
     elif action == "restart":
-        remote_cmd = f"sudo systemctl restart {shlex.quote(node.service_name)}"
+        remote_cmd = f"sudo -n systemctl restart {shlex.quote(node.service_name)}"
     else:
         return False, f"Unknown action: {action}"
 
-    cmd = ["ssh", f"{user_prefix}{node.ssh_host}", remote_cmd]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    cmd = [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        f"{user_prefix}{node.ssh_host}",
+        remote_cmd,
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        return False, "SSH command timed out after 15 seconds"
     ok = proc.returncode == 0
     output = (proc.stdout + "\n" + proc.stderr).strip()
     return ok, output or "OK"
