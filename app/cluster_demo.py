@@ -481,17 +481,18 @@ def apply_compact_top_styles() -> None:
         """
         <style>
             div.block-container {
-                padding-top: 0.7rem;
+                padding-top: 1.2rem;
                 padding-bottom: 0.6rem;
             }
 
             h1 {
-                font-size: 2.2rem !important;
-                margin-bottom: 0.1rem !important;
+                font-size: 2.05rem !important;
+                line-height: 1.2 !important;
+                margin-bottom: 0.2rem !important;
             }
 
             h3 {
-                font-size: 1.5rem !important;
+                font-size: 1.35rem !important;
                 margin-top: 0.45rem !important;
                 margin-bottom: 0.2rem !important;
             }
@@ -531,9 +532,10 @@ def apply_compact_top_styles() -> None:
             }
 
             div[data-testid="stButton"] button {
-                font-size: 0.88rem !important;
-                min-height: 1.95rem !important;
-                padding: 0.2rem 0.45rem !important;
+                font-size: 0.76rem !important;
+                min-height: 1.35rem !important;
+                padding: 0.05rem 0.35rem !important;
+                line-height: 1.15 !important;
             }
         </style>
         """,
@@ -626,7 +628,10 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
         }
     )
     st.caption(f"Целевая БД нагрузки (Target DB): {target_db}")
-    st.dataframe(localized_df, width="stretch", height=190)
+    row_height_px = 35
+    header_height_px = 38
+    table_height = max(105, min(190, header_height_px + len(localized_df) * row_height_px))
+    st.dataframe(localized_df, width="stretch", height=table_height, hide_index=True)
     if rows and all(row.get("status") != "up" for row in rows):
         LOGGER.warning(
             "No DB connections to any node. Errors: %s",
