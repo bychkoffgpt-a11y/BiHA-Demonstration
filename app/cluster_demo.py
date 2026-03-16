@@ -9,6 +9,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
+
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import psycopg
@@ -17,6 +20,7 @@ import streamlit as st
 APP_TITLE = "BiHA PostgreSQL Cluster Demo"
 DEFAULT_HISTORY = 120
 MAX_WORKERS = 32
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
 
 @dataclass
@@ -126,23 +130,52 @@ def select_node_for_workload(nodes: list[NodeConfig], mode: str, write_tx: bool)
 
 
 def execute_workload_tx(node: NodeConfig, write_tx: bool) -> None:
-    with psycopg.connect(node.dsn, connect_timeout=2, autocommit=True) as conn:
+    with psycopg.connect(node.dsn, connect_timeout=2, autocommit=False) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT pg_sleep(0.01), 1")
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS biha_demo_load (
+                    id bigserial PRIMARY KEY,
+                    created_at timestamptz NOT NULL DEFAULT now(),
+                    payload text NOT NULL
+                )
+                """
+            )
             if write_tx:
+                payload = f"demo-{time.time()}"
+                cur.execute("INSERT INTO biha_demo_load(payload) VALUES (%s) RETURNING id", (payload,))
+                row_id = cur.fetchone()[0]
+                cur.execute("SELECT id, payload, created_at FROM biha_demo_load WHERE id = %s", (row_id,))
+                cur.execute(
+                    "UPDATE biha_demo_load SET payload = payload || '-updated' WHERE id = %s",
+                    (row_id,),
+                )
+            else:
                 cur.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS biha_demo_load (
-                        id bigserial PRIMARY KEY,
-                        created_at timestamptz NOT NULL DEFAULT now(),
-                        payload text NOT NULL
-                    )
+                    SELECT id, payload, created_at
+                    FROM biha_demo_load
+                    ORDER BY id DESC
+                    LIMIT 100
                     """
                 )
-                cur.execute(
-                    "INSERT INTO biha_demo_load(payload) VALUES (%s)",
-                    (f"demo-{time.time()}",),
-                )
+        conn.commit()
+
+
+def extract_dbname_from_dsn(dsn: str) -> str:
+    parsed = urlparse(dsn)
+    db_from_path = parsed.path.lstrip("/")
+    if db_from_path:
+        return db_from_path
+    query = parse_qs(parsed.query)
+    return query.get("dbname", ["postgres"])[0]
+
+
+def get_target_database(cluster: ClusterConfig, mode: str) -> str:
+    preferred_node = select_node_for_workload(cluster.nodes, mode, write_tx=True)
+    if preferred_node:
+        return extract_dbname_from_dsn(preferred_node.dsn)
+    return extract_dbname_from_dsn(cluster.nodes[0].dsn) if cluster.nodes else "postgres"
 
 
 def load_cluster_config(path: Path) -> ClusterConfig:
@@ -151,7 +184,7 @@ def load_cluster_config(path: Path) -> ClusterConfig:
     return ClusterConfig(nodes=nodes, poll_interval_sec=cfg.get("poll_interval_sec", 2))
 
 
-def fetch_node_metrics(node: NodeConfig) -> dict[str, Any]:
+def fetch_node_metrics(node: NodeConfig, target_db: str) -> dict[str, Any]:
     result: dict[str, Any] = {
         "node": node.name,
         "status": "down",
@@ -165,6 +198,9 @@ def fetch_node_metrics(node: NodeConfig) -> dict[str, Any]:
         "tup_returned": None,
         "tup_fetched": None,
         "active_queries": None,
+        "blk_read_time_ms": None,
+        "blk_write_time_ms": None,
+        "disk_io_queue": None,
         "error": None,
     }
 
@@ -176,15 +212,28 @@ def fetch_node_metrics(node: NodeConfig) -> dict[str, Any]:
                     SELECT
                         CASE WHEN pg_is_in_recovery() THEN 'slave' ELSE 'master' END,
                         COALESCE(EXTRACT(EPOCH FROM now() - pg_last_xact_replay_timestamp())::bigint, 0),
-                        (SELECT count(*) FROM pg_locks WHERE granted),
-                        (SELECT xact_commit FROM pg_stat_database WHERE datname = current_database()),
-                        (SELECT xact_rollback FROM pg_stat_database WHERE datname = current_database()),
-                        (SELECT blks_read FROM pg_stat_database WHERE datname = current_database()),
-                        (SELECT blks_hit FROM pg_stat_database WHERE datname = current_database()),
-                        (SELECT tup_returned FROM pg_stat_database WHERE datname = current_database()),
-                        (SELECT tup_fetched FROM pg_stat_database WHERE datname = current_database()),
-                        (SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND state = 'active')
-                    """
+                        (
+                            SELECT count(*)
+                            FROM pg_locks l
+                            JOIN pg_stat_activity a ON a.pid = l.pid
+                            WHERE l.granted AND a.datname = %s
+                        ),
+                        (SELECT xact_commit FROM pg_stat_database WHERE datname = %s),
+                        (SELECT xact_rollback FROM pg_stat_database WHERE datname = %s),
+                        (SELECT blks_read FROM pg_stat_database WHERE datname = %s),
+                        (SELECT blks_hit FROM pg_stat_database WHERE datname = %s),
+                        (SELECT tup_returned FROM pg_stat_database WHERE datname = %s),
+                        (SELECT tup_fetched FROM pg_stat_database WHERE datname = %s),
+                        (SELECT count(*) FROM pg_stat_activity WHERE datname = %s AND state = 'active'),
+                        (SELECT COALESCE(blk_read_time, 0) FROM pg_stat_database WHERE datname = %s),
+                        (SELECT COALESCE(blk_write_time, 0) FROM pg_stat_database WHERE datname = %s),
+                        (
+                            SELECT count(*)
+                            FROM pg_stat_activity
+                            WHERE datname = %s AND wait_event_type = 'IO'
+                        )
+                    """,
+                    (target_db, target_db, target_db, target_db, target_db, target_db, target_db, target_db, target_db, target_db, target_db),
                 )
                 row = cur.fetchone()
                 if row:
@@ -201,6 +250,9 @@ def fetch_node_metrics(node: NodeConfig) -> dict[str, Any]:
                             "tup_returned": row[7],
                             "tup_fetched": row[8],
                             "active_queries": row[9],
+                            "blk_read_time_ms": row[10],
+                            "blk_write_time_ms": row[11],
+                            "disk_io_queue": row[12],
                         }
                     )
     except Exception as exc:
@@ -240,6 +292,7 @@ def render_sidebar() -> dict[str, Any]:
     tps = st.sidebar.slider("TPS", min_value=0, max_value=50000, value=500, step=100)
     read_ratio = st.sidebar.slider("Доля чтения (Read ratio)", 0.0, 1.0, 0.7, 0.05)
     auto_refresh = st.sidebar.checkbox("Автообновление (Auto-refresh)", value=True)
+    st.session_state.load_mode = mode
     return {"mode": mode, "tps": tps, "read_ratio": read_ratio, "auto_refresh": auto_refresh}
 
 
@@ -293,8 +346,12 @@ def reset_server_stats(cluster: ClusterConfig) -> None:
 
 def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
     st.subheader("Состояние кластера (Cluster state)")
-    rows = [fetch_node_metrics(node) for node in cluster.nodes]
+    mode = st.session_state.get("load_mode", "single-node")
+    target_db = get_target_database(cluster, mode)
+    rows = [fetch_node_metrics(node, target_db) for node in cluster.nodes]
     df = pd.DataFrame(rows)
+    if not df.empty:
+        df["status"] = df["status"].map({"up": "РАБОТАЕТ (UP)", "down": "НЕ РАБОТАЕТ (DOWN)"}).fillna(df["status"])
     localized_df = df.rename(
         columns={
             "node": "Узел (Node)",
@@ -309,9 +366,13 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
             "blks_hit": "Попаданий в кэш (Cache hits)",
             "tup_returned": "Возвращено строк (Rows returned)",
             "tup_fetched": "Извлечено строк (Rows fetched)",
+            "blk_read_time_ms": "Задержка чтения диска, мс (Disk read latency, ms)",
+            "blk_write_time_ms": "Задержка записи диска, мс (Disk write latency, ms)",
+            "disk_io_queue": "Очередь к диску (Disk queue)",
             "error": "Ошибка (Error)",
         }
     )
+    st.caption(f"Целевая БД нагрузки (Target DB): {target_db}")
     st.dataframe(localized_df, width="stretch")
 
     st.markdown("##### Состояние узлов (Node health)")
@@ -327,13 +388,14 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
         )
 
     summary_cols = st.columns(4)
-    up_nodes = int((df["status"] == "up").sum()) if not df.empty else 0
+    up_nodes = sum(1 for row in rows if row["status"] == "up")
     summary_cols[0].metric("Узлов в работе (Nodes UP)", up_nodes)
     summary_cols[1].metric("Мастер (Master)", ", ".join(df[df["role"] == "master"]["node"].tolist()) or "-")
     summary_cols[2].metric("Реплика (Slave)", ", ".join(df[df["role"] == "slave"]["node"].tolist()) or "-")
 
     stats = wg.stats_snapshot()
     summary_cols[3].metric("Ошибки генератора (Generator errors)", stats["errors"])
+    st.info(f"Статус генератора нагрузки (Load generator status): {'🟢 РАБОТАЕТ' if wg.running else '🔴 ОСТАНОВЛЕН'}")
 
     st.subheader("Статистика нагрузки (Load stats)")
     st.json(stats)
@@ -344,13 +406,16 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
     history = st.session_state.history
     history.append(
         {
-            "ts": pd.Timestamp.utcnow(),
+            "ts": pd.Timestamp.now(tz=MOSCOW_TZ),
             "read_tx": stats["read_tx"],
             "write_tx": stats["write_tx"],
             "errors": stats["errors"],
             "active_locks": int(df["active_locks"].fillna(0).sum()) if not df.empty else 0,
             "active_queries": int(df["active_queries"].fillna(0).sum()) if not df.empty else 0,
             **{f"blks_read_{row['node']}": int(row.get("blks_read") or 0) for row in rows},
+            **{f"disk_read_latency_{row['node']}": float(row.get("blk_read_time_ms") or 0.0) for row in rows},
+            **{f"disk_write_latency_{row['node']}": float(row.get("blk_write_time_ms") or 0.0) for row in rows},
+            **{f"disk_queue_{row['node']}": int(row.get("disk_io_queue") or 0) for row in rows},
         }
     )
 
@@ -363,10 +428,18 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
         st.line_chart(hist_df.set_index("ts")[["active_locks", "active_queries"]])
 
         st.markdown("##### Нагрузка на диски по узлам (Disk load per node)")
-        disk_cols = [f"blks_read_{node.name}" for node in cluster.nodes if f"blks_read_{node.name}" in hist_df.columns]
-        graph_cols = st.columns(max(len(disk_cols), 1))
-        for idx, col_name in enumerate(disk_cols):
-            graph_cols[idx].line_chart(hist_df.set_index("ts")[[col_name]])
+        disk_cols: list[str] = []
+        for node in cluster.nodes:
+            disk_cols.extend(
+                [
+                    f"disk_read_latency_{node.name}",
+                    f"disk_write_latency_{node.name}",
+                    f"disk_queue_{node.name}",
+                ]
+            )
+        disk_cols = [col for col in disk_cols if col in hist_df.columns]
+        if disk_cols:
+            st.line_chart(hist_df.set_index("ts")[disk_cols])
 
 
 def main() -> None:

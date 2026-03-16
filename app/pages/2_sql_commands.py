@@ -12,12 +12,26 @@ CREATE TABLE IF NOT EXISTS biha_demo_load (
     payload text NOT NULL
 );
 """,
-    "Чтение (Read transaction)": """
-SELECT pg_sleep(0.01), 1;
+    "Транзакция чтения (Read transaction)": """
+SELECT id, payload, created_at
+FROM biha_demo_load
+ORDER BY id DESC
+LIMIT 100;
 """,
-    "Запись (Write transaction)": """
+    "Транзакция чтения-записи (Read-write transaction, 3 commands)": """
+BEGIN;
 INSERT INTO biha_demo_load(payload)
-VALUES ('demo-<timestamp>');
+VALUES ('demo-<timestamp>')
+RETURNING id;
+
+SELECT id, payload, created_at
+FROM biha_demo_load
+WHERE id = <id_from_insert>;
+
+UPDATE biha_demo_load
+SET payload = payload || '-updated'
+WHERE id = <id_from_insert>;
+COMMIT;
 """,
 }
 
