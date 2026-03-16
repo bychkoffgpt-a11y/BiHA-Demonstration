@@ -358,9 +358,16 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
     rows = [fetch_node_metrics(node, target_db) for node in cluster.nodes]
     df = pd.DataFrame(rows)
     if not df.empty:
+        df.insert(
+            0,
+            "status_icon",
+            df["status"].map({"up": "🟢", "down": "🔴"}).fillna("⚪"),
+        )
+    if not df.empty:
         df["status"] = df["status"].map({"up": "РАБОТАЕТ (UP)", "down": "НЕ РАБОТАЕТ (DOWN)"}).fillna(df["status"])
     localized_df = df.rename(
         columns={
+            "status_icon": "Сост. (State)",
             "node": "Узел (Node)",
             "status": "Статус (Status)",
             "role": "Роль (Role)",
@@ -381,27 +388,7 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
     )
     st.caption(f"Целевая БД нагрузки (Target DB): {target_db}")
     st.dataframe(localized_df, width="stretch")
-
-    st.markdown("##### Состояние узлов (Node health)")
-    health_cols = st.columns(max(len(rows), 1))
-    for idx, row in enumerate(rows):
-        up = row["status"] == "up"
-        color = "#1f9d55" if up else "#dc2626"
-        text = "РАБОТАЕТ (UP)" if up else "НЕ РАБОТАЕТ (DOWN)"
-        health_cols[idx].markdown(
-            f"<div style='padding:10px;border-radius:8px;background:{color};color:white;text-align:center;'>"
-            f"<b>{row['node']}</b><br>{text}</div>",
-            unsafe_allow_html=True,
-        )
-
-    summary_cols = st.columns(4)
-    up_nodes = sum(1 for row in rows if row["status"] == "up")
-    summary_cols[0].metric("Узлов в работе (Nodes UP)", up_nodes)
-    summary_cols[1].metric("Мастер (Master)", ", ".join(df[df["role"] == "master"]["node"].tolist()) or "-")
-    summary_cols[2].metric("Реплика (Slave)", ", ".join(df[df["role"] == "slave"]["node"].tolist()) or "-")
-
     stats = wg.stats_snapshot()
-    summary_cols[3].metric("Ошибки генератора (Generator errors)", stats["errors"])
     st.info(f"Статус генератора нагрузки (Load generator status): {'🟢 РАБОТАЕТ' if wg.running else '🔴 ОСТАНОВЛЕН'}")
 
     st.subheader("Статистика нагрузки (Load stats)")
