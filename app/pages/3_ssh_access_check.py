@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shlex
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -37,7 +38,7 @@ def load_cluster_config(path: Path) -> ClusterConfig:
     return ClusterConfig(nodes=nodes)
 
 
-def run_ssh_check(node: NodeConfig, command: str, timeout_sec: int = 10) -> tuple[bool, str]:
+def run_ssh_check(node: NodeConfig, command: str, timeout_sec: int = 5) -> tuple[bool, str]:
     if not node.control_via_ssh or not node.ssh_host:
         return False, "SSH control disabled for this node in config"
 
@@ -98,7 +99,18 @@ def run_selected_checks(node: NodeConfig, checks: list[str]) -> list[dict[str, A
     check_map = available_checks(node)
     results: list[dict[str, Any]] = []
     for check_name in checks:
-        command = check_map[check_name]
+        command = check_map.get(check_name)
+        if not command:
+            results.append(
+                {
+                    "Узел (Node)": node.name,
+                    "Проверка (Check)": check_name,
+                    "Команда (Command)": "N/A",
+                    "Статус (Status)": "FAIL",
+                    "Вывод (Output)": "Unknown check name",
+                }
+            )
+            continue
         ok, output = run_ssh_check(node, command)
         results.append(
             {
@@ -110,6 +122,36 @@ def run_selected_checks(node: NodeConfig, checks: list[str]) -> list[dict[str, A
             }
         )
     return results
+
+
+def run_checks_for_nodes(cluster: ClusterConfig, selected_nodes: list[str], selected_checks: list[str]) -> list[dict[str, Any]]:
+    nodes_to_check = [node for node in cluster.nodes if node.name in selected_nodes]
+    if not nodes_to_check:
+        return []
+
+    worker_count = max(1, min(8, len(nodes_to_check)))
+    results_by_node: dict[str, list[dict[str, Any]]] = {}
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_to_node = {executor.submit(run_selected_checks, node, selected_checks): node.name for node in nodes_to_check}
+        for future in as_completed(future_to_node):
+            node_name = future_to_node[future]
+            try:
+                results_by_node[node_name] = future.result()
+            except Exception as exc:
+                results_by_node[node_name] = [
+                    {
+                        "Узел (Node)": node_name,
+                        "Проверка (Check)": "execution",
+                        "Команда (Command)": "N/A",
+                        "Статус (Status)": "FAIL",
+                        "Вывод (Output)": str(exc),
+                    }
+                ]
+
+    ordered_results: list[dict[str, Any]] = []
+    for node_name in selected_nodes:
+        ordered_results.extend(results_by_node.get(node_name, []))
+    return ordered_results
 
 
 st.set_page_config(page_title="SSH доступ к узлам", layout="wide")
@@ -158,12 +200,8 @@ if col1.button("Запустить проверки (Run checks)", type="primary
     elif not selected_checks:
         st.warning("Выберите хотя бы одну проверку.")
     else:
-        all_results: list[dict[str, Any]] = []
-        for node in cluster.nodes:
-            if node.name not in selected_nodes:
-                continue
-            all_results.extend(run_selected_checks(node, selected_checks))
-        st.session_state.ssh_check_results = all_results
+        with st.spinner("Выполняются SSH-проверки... (Running SSH checks...)"):
+            st.session_state.ssh_check_results = run_checks_for_nodes(cluster, selected_nodes, selected_checks)
 
 if col2.button("Очистить результаты (Clear results)", width="stretch"):
     st.session_state.ssh_check_results = []

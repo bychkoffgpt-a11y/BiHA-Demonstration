@@ -6,6 +6,7 @@ import shlex
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ import streamlit as st
 APP_TITLE = "BiHA PostgreSQL Cluster Demo"
 DEFAULT_HISTORY = 120
 MAX_WORKERS = 32
+METRICS_FETCH_WORKERS = 8
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
 
@@ -272,6 +274,41 @@ def fetch_node_metrics(node: NodeConfig, target_db: str) -> dict[str, Any]:
     return result
 
 
+def fetch_all_node_metrics(nodes: list[NodeConfig], target_db: str) -> list[dict[str, Any]]:
+    if not nodes:
+        return []
+
+    worker_count = max(1, min(METRICS_FETCH_WORKERS, len(nodes)))
+    rows_by_name: dict[str, dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_to_node = {executor.submit(fetch_node_metrics, node, target_db): node for node in nodes}
+        for future in as_completed(future_to_node):
+            node = future_to_node[future]
+            try:
+                rows_by_name[node.name] = future.result()
+            except Exception as exc:
+                rows_by_name[node.name] = {
+                    "node": node.name,
+                    "status": "down",
+                    "role": node.role_hint,
+                    "replay_delay_sec": None,
+                    "active_locks": None,
+                    "xact_commit": None,
+                    "xact_rollback": None,
+                    "blks_read": None,
+                    "blks_hit": None,
+                    "tup_returned": None,
+                    "tup_fetched": None,
+                    "active_queries": None,
+                    "blk_read_time_ms": None,
+                    "blk_write_time_ms": None,
+                    "disk_io_queue": None,
+                    "error": str(exc),
+                }
+
+    return [rows_by_name[node.name] for node in nodes if node.name in rows_by_name]
+
+
 def run_node_action(node: NodeConfig, action: str) -> tuple[bool, str]:
     if not node.control_via_ssh or not node.ssh_host:
         return False, "SSH control disabled for this node in config"
@@ -398,7 +435,7 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
     st.subheader("Состояние кластера (Cluster state)")
     mode = st.session_state.get("load_mode", "single-node")
     target_db = get_target_database(cluster, mode)
-    rows = [fetch_node_metrics(node, target_db) for node in cluster.nodes]
+    rows = fetch_all_node_metrics(cluster.nodes, target_db)
     df = pd.DataFrame(rows)
     if not df.empty:
         df.insert(
@@ -431,6 +468,8 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
     )
     st.caption(f"Целевая БД нагрузки (Target DB): {target_db}")
     st.dataframe(localized_df, width="stretch")
+    if rows and all(row.get("status") != "up" for row in rows):
+        st.warning("Нет подключений к узлам БД. Проверьте доступность PostgreSQL и параметры DSN/SSH в конфиге.")
     stats = wg.stats_snapshot()
     st.info(f"Статус генератора нагрузки (Load generator status): {'🟢 РАБОТАЕТ' if wg.running else '🔴 ОСТАНОВЛЕН'}")
 
