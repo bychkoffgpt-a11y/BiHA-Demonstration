@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shlex
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +11,10 @@ from typing import Any
 
 import pandas as pd
 import streamlit as st
+
+from logging_utils import setup_file_logger
+
+LOGGER = setup_file_logger()
 
 
 @dataclass
@@ -40,6 +45,7 @@ def load_cluster_config(path: Path) -> ClusterConfig:
 
 def run_ssh_check(node: NodeConfig, command: str, timeout_sec: int = 5) -> tuple[bool, str]:
     if not node.control_via_ssh or not node.ssh_host:
+        LOGGER.warning("SSH check skipped for node=%s reason=control_disabled", node.name)
         return False, "SSH control disabled for this node in config"
 
     user_prefix = f"{node.ssh_user}@" if node.ssh_user else ""
@@ -75,12 +81,40 @@ def run_ssh_check(node: NodeConfig, command: str, timeout_sec: int = 5) -> tuple
             cmd.extend(["-o", opt])
 
     cmd.extend([f"{user_prefix}{node.ssh_host}", command])
+    log_command = " ".join(shlex.quote(part) for part in cmd)
+    started_at = time.perf_counter()
+    LOGGER.info(
+        "SSH check started node=%s host=%s timeout_sec=%s command=%s",
+        node.name,
+        node.ssh_host,
+        timeout_sec,
+        log_command,
+    )
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
     except subprocess.TimeoutExpired:
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000)
+        LOGGER.error(
+            "SSH check timeout node=%s host=%s timeout_sec=%s elapsed_ms=%s command=%s",
+            node.name,
+            node.ssh_host,
+            timeout_sec,
+            elapsed_ms,
+            log_command,
+        )
         return False, f"Command timed out after {timeout_sec} seconds"
 
     output = (proc.stdout + "\n" + proc.stderr).strip()
+    elapsed_ms = round((time.perf_counter() - started_at) * 1000)
+    LOGGER.info(
+        "SSH check finished node=%s host=%s returncode=%s elapsed_ms=%s stdout=%r stderr=%r",
+        node.name,
+        node.ssh_host,
+        proc.returncode,
+        elapsed_ms,
+        proc.stdout.strip(),
+        proc.stderr.strip(),
+    )
     return proc.returncode == 0, output or "OK"
 
 
