@@ -287,6 +287,8 @@ def run_node_action(node: NodeConfig, action: str) -> tuple[bool, str]:
         "-o",
         "BatchMode=yes",
         "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
         "ConnectTimeout=5",
         f"{user_prefix}{node.ssh_host}",
         remote_cmd,
