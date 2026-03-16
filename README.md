@@ -119,7 +119,12 @@ streamlit run app/cluster_demo.py
    - проверьте `control_via_ssh`, `ssh_host`, `ssh_user`;
    - проверьте sudo-права на `systemctl` для `service_name`.
 
-3. **Много ошибок генератора нагрузки**
+3. **`ModuleNotFoundError: No module named 'psycopg'`**
+   - активируйте виртуальное окружение, в котором запускаете Streamlit;
+   - установите зависимости заново: `pip install -r requirements.txt`;
+   - если ошибка сохраняется, установите драйвер напрямую: `pip install "psycopg[binary]>=3.2"`.
+
+4. **Много ошибок генератора нагрузки**
    - снизьте `TPS`;
    - проверьте лимиты подключений PostgreSQL и стабильность сети.
 
