@@ -62,6 +62,10 @@ streamlit run app/cluster_demo.py
       "control_via_ssh": true,
       "ssh_host": "10.10.10.11",
       "ssh_user": "postgres",
+      "ssh_port": 22,
+      "ssh_identity_file": "/home/appuser/.ssh/id_ed25519",
+      "ssh_legacy_algorithms": false,
+      "ssh_extra_options": ["ServerAliveInterval=15", "ServerAliveCountMax=3"],
       "service_name": "postgrespro"
     },
     {
@@ -71,6 +75,10 @@ streamlit run app/cluster_demo.py
       "control_via_ssh": true,
       "ssh_host": "10.10.10.12",
       "ssh_user": "postgres",
+      "ssh_port": 22,
+      "ssh_identity_file": "/home/appuser/.ssh/id_ed25519",
+      "ssh_legacy_algorithms": false,
+      "ssh_extra_options": ["ServerAliveInterval=15", "ServerAliveCountMax=3"],
       "service_name": "postgrespro"
     }
   ]
@@ -80,6 +88,8 @@ streamlit run app/cluster_demo.py
 Пояснения:
 - `role_hint` влияет на распределение нагрузки в выбранном режиме;
 - фактическая роль (master/slave) определяется запросом `pg_is_in_recovery()`;
+- `ssh_port`, `ssh_identity_file`, `ssh_extra_options` помогают стабилизировать SSH-подключение между разными дистрибутивами;
+- `ssh_legacy_algorithms=true` включает совместимость с устаревшими SSH-алгоритмами на старых хостах;
 - если `control_via_ssh=false`, кнопки stop/start/restart для узла не будут работать.
 
 ---
@@ -117,7 +127,60 @@ streamlit run app/cluster_demo.py
 
 2. **Не работают кнопки failover через SSH**
    - проверьте `control_via_ssh`, `ssh_host`, `ssh_user`;
+   - проверьте `ssh_port` и путь `ssh_identity_file` у пользователя, под которым запущен Streamlit;
+   - если на ALT Linux используются старые SSH-алгоритмы, временно включите `ssh_legacy_algorithms=true`;
    - проверьте sudo-права на `systemctl` для `service_name`.
+
+---
+
+## Рекомендации по настройке SSH для RED OS 8.0.2 -> ALT Linux 10.2.1
+
+На **каждом ALT Linux узле**:
+
+1. Установите и включите OpenSSH-сервер:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y openssh-server
+sudo systemctl enable --now sshd
+```
+
+2. Добавьте публичный ключ пользователя приложения (с RED OS) в `~/.ssh/authorized_keys` целевого SSH-пользователя.
+
+3. Проверьте базовые параметры `/etc/openssh/sshd_config`:
+   - `PubkeyAuthentication yes`
+   - `PasswordAuthentication no` (рекомендуется для прод)
+   - `PermitRootLogin prohibit-password` (или `no`)
+
+4. Если нет возможности обновить SSH-стек на ALT Linux, разрешите совместимость (временно):
+   - `HostKeyAlgorithms +ssh-rsa`
+   - `PubkeyAcceptedAlgorithms +ssh-rsa`
+   - `KexAlgorithms +diffie-hellman-group14-sha1`
+
+5. Перезапустите sshd и проверьте:
+
+```bash
+sudo systemctl restart sshd
+sudo sshd -T | egrep '^(pubkeyauthentication|passwordauthentication|permitrootlogin|kexalgorithms|hostkeyalgorithms)'
+```
+
+На **хосте приложения (RED OS)**:
+
+1. Убедитесь, что ключ доступен пользователю процесса Streamlit:
+
+```bash
+ls -l ~/.ssh
+ssh -i ~/.ssh/id_ed25519 -p 22 postgres@10.10.10.11 whoami
+```
+
+2. Если handshake падает из-за алгоритмов, в конфиге узла включите:
+   - `"ssh_legacy_algorithms": true`
+
+3. Для диагностики вручную используйте:
+
+```bash
+ssh -vvv -o BatchMode=yes -o ConnectTimeout=5 -i ~/.ssh/id_ed25519 postgres@10.10.10.11 whoami
+```
 
 3. **`ModuleNotFoundError: No module named 'psycopg'`**
    - активируйте виртуальное окружение, в котором запускаете Streamlit;

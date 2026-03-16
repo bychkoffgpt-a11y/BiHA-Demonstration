@@ -8,6 +8,13 @@
       "control_via_ssh": true,
       "ssh_host": "10.0.0.11",
       "ssh_user": "postgres",
+      "ssh_port": 22,
+      "ssh_identity_file": "/home/appuser/.ssh/id_ed25519",
+      "ssh_legacy_algorithms": false,
+      "ssh_extra_options": [
+        "ServerAliveInterval=15",
+        "ServerAliveCountMax=3"
+      ],
       "service_name": "postgrespro"
     },
     {
@@ -17,6 +24,13 @@
       "control_via_ssh": true,
       "ssh_host": "10.0.0.12",
       "ssh_user": "postgres",
+      "ssh_port": 22,
+      "ssh_identity_file": "/home/appuser/.ssh/id_ed25519",
+      "ssh_legacy_algorithms": false,
+      "ssh_extra_options": [
+        "ServerAliveInterval=15",
+        "ServerAliveCountMax=3"
+      ],
       "service_name": "postgrespro"
     }
   ]
