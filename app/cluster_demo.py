@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import psycopg
+from psycopg.conninfo import conninfo_to_dict
 import streamlit as st
 
 from logging_utils import setup_file_logger
@@ -180,6 +181,15 @@ def execute_workload_tx(node: NodeConfig, write_tx: bool) -> None:
 
 
 def extract_dbname_from_dsn(dsn: str) -> str:
+    try:
+        conninfo = conninfo_to_dict(dsn)
+    except Exception:
+        conninfo = {}
+
+    dbname = conninfo.get("dbname")
+    if dbname:
+        return dbname
+
     parsed = urlparse(dsn)
     db_from_path = parsed.path.lstrip("/")
     if db_from_path:
