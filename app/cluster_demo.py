@@ -562,7 +562,7 @@ def main() -> None:
     st.title(APP_TITLE)
     st.caption("Демо-интерфейс для проверки кластера BiHA PostgreSQL Pro (Demo GUI for BiHA PostgreSQL Pro cluster validation)")
 
-    cfg_path = Path(st.text_input("Путь к конфигу (Path to config)", "config/cluster.example.json"))
+    cfg_path = Path(st.text_input("Путь к конфигу (Path to config)", "config/cluster.json"))
     if not cfg_path.exists():
         st.error(f"Конфиг не найден (Config not found): {cfg_path}")
         st.stop()
