@@ -108,25 +108,32 @@ class WorkloadGenerator:
 
 
 def select_node_for_workload(nodes: list[NodeConfig], mode: str, write_tx: bool) -> NodeConfig | None:
-    masters = [n for n in nodes if n.role_hint == "master"]
-    slaves = [n for n in nodes if n.role_hint == "slave"]
+    master_hints = {"master", "primary", "leader"}
+    slave_hints = {"slave", "replica", "standby"}
+
+    masters = [n for n in nodes if n.role_hint.strip().lower() in master_hints]
+    slaves = [n for n in nodes if n.role_hint.strip().lower() in slave_hints]
+
+    fallback_node = nodes[0] if nodes else None
 
     if mode == "single-node":
-        return masters[0] if masters else (nodes[0] if nodes else None)
+        return masters[0] if masters else fallback_node
 
     if mode == "dual-read":
         if write_tx:
-            return masters[0] if masters else None
-        return random.choice(nodes) if nodes else None
+            return masters[0] if masters else fallback_node
+        return random.choice(nodes) if nodes else fallback_node
 
     if mode == "master-rw-slave-r":
         if write_tx:
-            return masters[0] if masters else None
+            return masters[0] if masters else fallback_node
         if slaves:
             return random.choice(slaves)
-        return masters[0] if masters else None
+        if masters:
+            return masters[0]
+        return fallback_node
 
-    return nodes[0] if nodes else None
+    return fallback_node
 
 
 def execute_workload_tx(node: NodeConfig, write_tx: bool) -> None:
