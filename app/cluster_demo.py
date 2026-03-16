@@ -430,7 +430,8 @@ def apply_compact_top_styles() -> None:
         """
         <style>
             div.block-container {
-                padding-top: 1.2rem;
+                padding-top: 0.7rem;
+                padding-bottom: 0.6rem;
             }
 
             h1 {
@@ -439,14 +440,30 @@ def apply_compact_top_styles() -> None:
             }
 
             h3 {
-                font-size: 2rem !important;
-                margin-top: 0.8rem !important;
-                margin-bottom: 0.4rem !important;
+                font-size: 1.5rem !important;
+                margin-top: 0.45rem !important;
+                margin-bottom: 0.2rem !important;
             }
 
             .stCaption {
-                font-size: 0.9rem !important;
-                margin-bottom: 0.2rem !important;
+                font-size: 0.84rem !important;
+                margin-bottom: 0.1rem !important;
+            }
+
+            div[data-testid="stHorizontalBlock"] {
+                gap: 0.5rem !important;
+            }
+
+            div[data-testid="stMetricValue"] {
+                font-size: 1.25rem !important;
+            }
+
+            div[data-testid="stMetricLabel"] {
+                font-size: 0.8rem !important;
+            }
+
+            div[data-testid="stMetricDelta"] {
+                font-size: 0.75rem !important;
             }
 
             div[data-testid="stTextInput"] label p,
@@ -463,9 +480,9 @@ def apply_compact_top_styles() -> None:
             }
 
             div[data-testid="stButton"] button {
-                font-size: 0.92rem !important;
-                min-height: 2.2rem !important;
-                padding: 0.3rem 0.6rem !important;
+                font-size: 0.88rem !important;
+                min-height: 1.95rem !important;
+                padding: 0.2rem 0.45rem !important;
             }
         </style>
         """,
@@ -557,7 +574,7 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
         }
     )
     st.caption(f"Целевая БД нагрузки (Target DB): {target_db}")
-    st.dataframe(localized_df, width="stretch")
+    st.dataframe(localized_df, width="stretch", height=190)
     if rows and all(row.get("status") != "up" for row in rows):
         LOGGER.warning(
             "No DB connections to any node. Errors: %s",
@@ -597,10 +614,6 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
 
     hist_df = pd.DataFrame(history)
     if not hist_df.empty:
-        st.line_chart(hist_df.set_index("ts")[["read_tx", "write_tx", "errors"]])
-        st.line_chart(hist_df.set_index("ts")[["active_locks", "active_queries"]])
-
-        st.markdown("##### Нагрузка на диски по узлам (Disk load per node)")
         disk_cols: list[str] = []
         for node in cluster.nodes:
             disk_cols.extend(
@@ -611,8 +624,24 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
                 ]
             )
         disk_cols = [col for col in disk_cols if col in hist_df.columns]
-        if disk_cols:
-            st.line_chart(hist_df.set_index("ts")[disk_cols])
+
+        chart_df = hist_df.set_index("ts")
+        chart_cols = st.columns(3)
+
+        with chart_cols[0]:
+            st.caption("Запросы и ошибки (Queries and errors)")
+            st.line_chart(chart_df[["read_tx", "write_tx", "errors"]], height=160)
+
+        with chart_cols[1]:
+            st.caption("Блокировки и активные запросы (Locks and active queries)")
+            st.line_chart(chart_df[["active_locks", "active_queries"]], height=160)
+
+        with chart_cols[2]:
+            st.caption("Нагрузка на диски по узлам (Disk load per node)")
+            if disk_cols:
+                st.line_chart(chart_df[disk_cols], height=160)
+            else:
+                st.info("Пока нет данных по дискам")
 
 
 def main() -> None:
