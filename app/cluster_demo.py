@@ -403,7 +403,10 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
     st.info(f"Статус генератора нагрузки (Load generator status): {'🟢 РАБОТАЕТ' if wg.running else '🔴 ОСТАНОВЛЕН'}")
 
     st.subheader("Статистика нагрузки (Load stats)")
-    st.json(stats)
+    stat_cols = st.columns(3)
+    stat_cols[0].metric("Транзакции чтения", f"{stats['read_tx']:,}".replace(",", " "))
+    stat_cols[1].metric("Транзакции записи", f"{stats['write_tx']:,}".replace(",", " "))
+    stat_cols[2].metric("Ошибки", f"{stats['errors']:,}".replace(",", " "))
 
     if "history" not in st.session_state:
         st.session_state.history = []
