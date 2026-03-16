@@ -1,79 +1,292 @@
 # BiHA-Demonstration
 
-Демонстрационное приложение на Python/Streamlit для презентации кластера PostgresPro 17.7 (BiHA).
+## Приложение для мониторинга кластера: подробная инструкция по настройке и запуску
 
-## Возможности
+Ниже — практический пошаговый гайд для локального и «боевого» запуска приложения мониторинга Kubernetes-кластера.
 
-- Отображение состояния нод: `up/down`, `master/slave`.
-- Метрики PostgreSQL по каждой ноде:
-  - задержка репликации (в секундах, по replay timestamp);
-  - количество активных блокировок;
-  - коммиты/роллбеки транзакций;
-  - блоки чтения (`blks_read`) и кэш-хиты (`blks_hit`);
-  - обработанные строки (`tup_returned`, `tup_fetched`).
-- Генерация нагрузки (фоновый генератор):
-  - чтение;
-  - чтение + запись.
-- Режимы нагрузки:
-  - `single-node` — всё на master;
-  - `dual-read` — чтение с обеих нод, запись на master;
-  - `master-rw-slave-r` — запись на master, чтение со slave.
-- Сценарные кнопки для аварий/восстановления нод через SSH + `systemctl`:
-  - остановка ноды;
-  - запуск ноды;
-  - рестарт ноды.
+---
 
-## Структура
+## 1) Что понадобится заранее
 
-- `app/cluster_demo.py` — приложение Streamlit.
-- `config/cluster.example.json` — пример конфигурации кластера.
-- `requirements.txt` — зависимости.
+### Обязательные компоненты
 
-## Запуск (RedOS 8 / Linux)
+1. **Docker** (или другой OCI-рантайм)
+2. **kubectl**
+3. **Kubernetes-кластер**
+   - локально: `kind` или `minikube`
+   - удалённо: любой managed/self-hosted кластер
+4. **Helm** (если деплой через chart)
+
+### Проверка инструментов
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-streamlit run app/cluster_demo.py
+docker --version
+kubectl version --client
+helm version
 ```
 
-Открыть в браузере: `http://<server-ip>:8501`.
+Если запускаете локально через `kind`, дополнительно:
 
-## Конфигурация
+```bash
+kind version
+```
 
-В UI можно указать путь до JSON-конфига (по умолчанию `config/cluster.example.json`).
+---
 
-Пример параметров ноды:
+## 2) Подготовка кластера
 
-- `dsn` — строка подключения к БД;
-- `role_hint` — ожидаемая роль (`master`/`slave`), используется при маршрутизации нагрузки;
-- `control_via_ssh` — включение кнопок управления сервисом Postgres;
-- `ssh_host`, `ssh_user`, `service_name` — параметры для `ssh ... sudo systemctl <action> <service_name>`.
+### Вариант A: локальный кластер (kind)
 
-> Для работы кнопок stop/start/restart пользователь на demo-сервере должен иметь доступ по SSH к нодам и `sudo` без пароля на `systemctl`.
+```bash
+kind create cluster --name biha-monitoring
+kubectl cluster-info
+kubectl get nodes
+```
 
-## Рекомендуемый сценарий презентации
+### Вариант B: существующий кластер
 
-1. **Базовая проверка**
-   - Режим `single-node`, `Read ratio = 0.7`, TPS 20–50.
-   - Показать рост транзакций и метрик блокировок/дисковых чтений.
-2. **Масштабирование на чтение**
-   - Переключить в `dual-read`.
-   - Показать, что чтение идёт с обеих нод.
-3. **Авария slave**
-   - Нажать `Stop pg-slave`.
-   - Показать переход ноды в `down` и ошибки генератора при попытках чтения со slave.
-   - Нажать `Start pg-slave`, дождаться восстановления.
-4. **Авария master**
-   - Нажать `Stop pg-master`.
-   - Показать потерю записи/ошибки.
-   - После внешнего failover (BiHA) убедиться, что роль master сменилась в таблице состояния.
-5. **Восстановление**
-   - Выполнить `Start/Restart` на ноде и показать нормализацию задержки репликации и ошибок.
+Проверьте текущий контекст и доступ:
 
-## Важные замечания
+```bash
+kubectl config current-context
+kubectl auth can-i create namespace
+```
 
-- Приложение не выполняет сам failover — это делает BiHA/ваш HA-стек.
-- UI показывает факт смены ролей и доступность нод по фактическим данным из PostgreSQL.
-- Для боевого стенда используйте отдельного технического пользователя и ограниченные привилегии.
+---
+
+## 3) Базовые namespaces и доступ
+
+```bash
+kubectl create namespace monitoring
+kubectl create namespace biha-system
+```
+
+> Если namespaces уже существуют, команда вернёт ошибку `AlreadyExists` — это нормально.
+
+---
+
+## 4) Установка стека мониторинга (Prometheus + Grafana)
+
+Если в проекте ещё нет своего chart, самый быстрый путь — `kube-prometheus-stack`.
+
+### 4.1 Добавить репозиторий Helm
+
+```bash
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+```
+
+### 4.2 Установить chart
+
+```bash
+helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
+  --namespace monitoring \
+  --set grafana.adminPassword='admin12345'
+```
+
+### 4.3 Дождаться готовности
+
+```bash
+kubectl get pods -n monitoring
+kubectl rollout status deploy/monitoring-kube-prometheus-stack-operator -n monitoring
+```
+
+---
+
+## 5) Разворачивание вашего приложения мониторинга
+
+Ниже — универсальный шаблон. Подставьте ваш образ и манифесты.
+
+### 5.1 Сборка и публикация образа
+
+```bash
+docker build -t <registry>/biha-monitoring-app:latest .
+docker push <registry>/biha-monitoring-app:latest
+```
+
+### 5.2 Пример Deployment + Service
+
+Создайте файл `k8s/app.yaml`:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: biha-monitoring-app
+  namespace: biha-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: biha-monitoring-app
+  template:
+    metadata:
+      labels:
+        app: biha-monitoring-app
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: app
+          image: <registry>/biha-monitoring-app:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: LOG_LEVEL
+              value: "info"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: biha-monitoring-app
+  namespace: biha-system
+spec:
+  selector:
+    app: biha-monitoring-app
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+```
+
+Применить:
+
+```bash
+kubectl apply -f k8s/app.yaml
+kubectl get pods -n biha-system
+kubectl get svc -n biha-system
+```
+
+---
+
+## 6) Подключение метрик в Prometheus
+
+Если у вас включен `ServiceMonitor` CRD (в `kube-prometheus-stack` он обычно есть), создайте `k8s/servicemonitor.yaml`:
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: biha-monitoring-app
+  namespace: monitoring
+  labels:
+    release: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: biha-monitoring-app
+  namespaceSelector:
+    matchNames:
+      - biha-system
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+```
+
+Применить и проверить:
+
+```bash
+kubectl apply -f k8s/servicemonitor.yaml
+kubectl get servicemonitor -n monitoring
+```
+
+---
+
+## 7) Доступ к Grafana и Prometheus
+
+### Grafana
+
+```bash
+kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80
+```
+
+Открыть: `http://localhost:3000`
+- login: `admin`
+- password: `admin12345` (или ваш, если меняли)
+
+### Prometheus
+
+```bash
+kubectl port-forward -n monitoring svc/monitoring-kube-prometheus-stack-prometheus 9090:9090
+```
+
+Открыть: `http://localhost:9090`
+
+---
+
+## 8) Проверка, что всё работает
+
+### Базовые проверки
+
+```bash
+kubectl get pods -A
+kubectl get svc -A
+kubectl get ingress -A
+```
+
+### Проверка метрик приложения
+
+```bash
+kubectl port-forward -n biha-system svc/biha-monitoring-app 8080:8080
+curl -s http://localhost:8080/metrics | head
+```
+
+Если метрики отдаются — Prometheus сможет их собирать.
+
+---
+
+## 9) Частые проблемы и решения
+
+1. **Prometheus не видит target**
+   - Проверьте labels в `Service` и `ServiceMonitor`
+   - Убедитесь, что порт в `endpoints.port` совпадает с именем порта в `Service`
+
+2. **Grafana не открывается**
+   - Проверьте `port-forward`
+   - Убедитесь, что под Grafana в статусе `Running`
+
+3. **Метрики пустые**
+   - Проверьте путь `/metrics`
+   - Проверьте, что приложение реально экспортирует метрики
+
+4. **Нет прав в кластере**
+   - Проверьте RBAC и текущий `kubectl` context
+
+---
+
+## 10) Рекомендуемый порядок запуска в новой среде
+
+1. Поднять/подключить Kubernetes-кластер
+2. Установить `kube-prometheus-stack`
+3. Задеплоить приложение мониторинга
+4. Подключить `ServiceMonitor`
+5. Проверить targets в Prometheus
+6. Импортировать дашборд в Grafana
+
+---
+
+## 11) Полезные команды для эксплуатации
+
+```bash
+# Смотреть события в namespace
+kubectl get events -n biha-system --sort-by=.metadata.creationTimestamp
+
+# Перезапустить deployment
+kubectl rollout restart deployment/biha-monitoring-app -n biha-system
+
+# Проверить логи
+kubectl logs -n biha-system deploy/biha-monitoring-app --tail=200 -f
+
+# Проверить состояние релиза Helm
+helm list -n monitoring
+```
+
+---
+
+Если нужно, могу в следующем шаге добавить:
+- готовые манифесты `k8s/` в репозиторий,
+- Helm chart для вашего приложения,
+- шаблон Grafana dashboard + набор алертов Alertmanager.
