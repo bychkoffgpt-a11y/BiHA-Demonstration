@@ -160,21 +160,20 @@ streamlit run app/cluster_demo.py
 
 ## Экран производительности кластера (новая страница)
 
-Страница **"Экран производительности кластера"** создана для live-демо на большом экране и выводит 8 синхронизированных графиков с общим горизонтом времени по оси X:
+Страница **"Экран производительности кластера"** создана для live-демо на большом экране и выводит 7 графиков с общим горизонтом времени по оси X. Метрики собираются в фоновом потоке, а UI обновляется асинхронно.
 
 ### Верхний ряд — результат нагрузки
 
 1. `TPS (транзакции/с)` — `COMMIT/s` и `ROLLBACK/s` из `pg_stat_database`.
-2. `Latency p95 (мс)` — оценка p95 по снимкам `pg_stat_statements`.
+2. `Latency p95 (мс)` — оценка p95 по времени выполнения активных запросов из `pg_stat_activity`.
 3. `Active sessions by state` — `active / waiting / idle in xact / idle` из `pg_stat_activity`.
-4. `Top SQL by total time (мс/с)` — топ запросов по приросту времени выполнения из `pg_stat_statements`.
 
 ### Нижний ряд — цена и устойчивость
 
-5. `CPU primary / standby (%)` — нормализованная загрузка CPU по SSH.
-6. `Disk latency (Primary, мс)` — read/write latency диска primary по SSH (`iostat`).
-7. `WAL generation rate (MB/s)` — скорость генерации WAL из `pg_stat_wal`.
-8. `Replication lag (с)` — отставание standby по `pg_stat_replication`.
+4. `CPU primary / standby (%)` — нормализованная загрузка CPU по SSH.
+5. `Disk latency (Primary, мс)` — read/write latency диска primary по SSH (`iostat`).
+6. `WAL generation rate (MB/s)` — скорость генерации WAL из `pg_stat_wal`.
+7. `Replication lag (с)` — отставание standby по `pg_stat_replication`.
 
 На странице доступны параметры:
 - **шаг агрегации** (`5 / 10 / 15 / 30 сек`);
@@ -184,8 +183,6 @@ streamlit run app/cluster_demo.py
 Рекомендуемый профиль для демонстрации:
 - live: интервал 15–30 минут, шаг 5–10 секунд;
 - тестовый прогон: интервал 30–60 минут, шаг 15–30 секунд.
-
-> Важно: для графиков `Latency p95` и `Top SQL` расширение `pg_stat_statements` должно быть установлено и доступно на primary.
 
 ---
 
