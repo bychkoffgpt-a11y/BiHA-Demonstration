@@ -600,14 +600,7 @@ series = build_timeseries(collector.history(), window_minutes)
 if not series:
     st.info("Соберите минимум два среза метрик для отображения графиков.")
 else:
-    layout = [st.columns(2) for _ in range(4)] if compact_grid else [st.columns(4) for _ in range(2)]
-    slots = [cell for row in layout for cell in row]
-
-    with slots[0]:
-        line_chart(series["tps"], "metric", "транзакции/с", "TPS (транзакции/с)", alt.Scale(zero=True))
-    with slots[1]:
-        line_chart(series["latency"], "metric", "мс", "Latency p95 (мс)", alt.Scale(zero=True))
-    with slots[2]:
+    def render_sessions_chart() -> None:
         sessions_df = series["sessions"].dropna(subset=["value"])
         if sessions_df.empty:
             st.info("Недостаточно данных")
@@ -624,12 +617,32 @@ else:
                 .properties(title="Active sessions by state", height=260)
             )
             st.altair_chart(theme_chart(chart), width="stretch")
-    with slots[3]:
-        line_chart(series["cpu"], "node", "%", "CPU primary / standby (%)", alt.Scale(domain=[0, 100]))
-    with slots[4]:
-        line_chart(series["disk"], "metric", "мс", "Disk latency (Primary, мс)", alt.Scale(zero=True))
-    with slots[5]:
-        line_chart(series["wal"], "metric", "МБ/с", "WAL generation rate (MB/s)", alt.Scale(zero=True))
+
+    charts: list[Callable[[], None]] = [
+        lambda: line_chart(series["tps"], "metric", "транзакции/с", "TPS (транзакции/с)", alt.Scale(zero=True)),
+        lambda: line_chart(series["latency"], "metric", "мс", "Latency p95 (мс)", alt.Scale(zero=True)),
+        render_sessions_chart,
+        lambda: line_chart(series["cpu"], "node", "%", "CPU primary / standby (%)", alt.Scale(domain=[0, 100])),
+        lambda: line_chart(series["disk"], "metric", "мс", "Disk latency (Primary, мс)", alt.Scale(zero=True)),
+        lambda: line_chart(series["wal"], "metric", "МБ/с", "WAL generation rate (MB/s)", alt.Scale(zero=True)),
+    ]
+
+    if compact_grid:
+        for idx in range(0, len(charts), 2):
+            row_cols = st.columns(2)
+            for col, chart_renderer in zip(row_cols, charts[idx : idx + 2], strict=False):
+                with col:
+                    chart_renderer()
+    else:
+        first_row = st.columns(4)
+        for col, chart_renderer in zip(first_row, charts[:4], strict=True):
+            with col:
+                chart_renderer()
+
+        second_row = st.columns(2)
+        for col, chart_renderer in zip(second_row, charts[4:], strict=True):
+            with col:
+                chart_renderer()
 
 if auto_refresh:
     st.caption("Сбор метрик выполняется в фоновом потоке. Интерфейс обновляется отдельно.")
