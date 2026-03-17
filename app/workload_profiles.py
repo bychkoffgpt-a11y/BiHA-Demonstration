@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import math
+import os
 import random
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Callable
 
@@ -55,13 +57,13 @@ FROM generate_series(1, %(branch_count)s) AS gs;
 PG_LIKE_FILL_TELLERS_SQL = """
 INSERT INTO pgbench_tellers (tid, bid, tbalance)
 SELECT gs, ((gs - 1) / %(tellers_per_branch)s)::int + 1, 0
-FROM generate_series(1, %(teller_count)s) AS gs;
+FROM generate_series(%(id_from)s, %(id_to)s) AS gs;
 """.strip()
 
 PG_LIKE_FILL_ACCOUNTS_SQL = """
 INSERT INTO pgbench_accounts (aid, bid, abalance)
 SELECT gs, ((gs - 1) / %(accounts_per_branch)s)::int + 1, 0
-FROM generate_series(1, %(account_count)s) AS gs;
+FROM generate_series(%(id_from)s, %(id_to)s) AS gs;
 """.strip()
 
 PG_LIKE_READ_SQL = """
@@ -149,13 +151,66 @@ def estimate_pg_like_sizing(target_size_gb: float, fillfactor: float = 1.25) -> 
     )
 
 
+def _normalized_worker_count(worker_count: int | None) -> int:
+    cpu_count = os.cpu_count() or 1
+    if worker_count is None:
+        return min(4, cpu_count)
+    return max(1, min(int(worker_count), cpu_count))
+
+
+def _build_id_chunks(total_rows: int, workers: int) -> list[tuple[int, int]]:
+    if total_rows <= 0:
+        return []
+    chunk_size = max(1, math.ceil(total_rows / (workers * 4)))
+    return [
+        (start, min(start + chunk_size - 1, total_rows))
+        for start in range(1, total_rows + 1, chunk_size)
+    ]
+
+
+def _parallel_fill(
+    dsn: str,
+    sql: str,
+    chunks: list[tuple[int, int]],
+    workers: int,
+    shared_params: dict[str, int],
+    progress_prefix: str,
+    progress_start: float,
+    progress_span: float,
+    report: Callable[[float, str], None],
+) -> None:
+    if not chunks:
+        report(progress_start + progress_span, f"{progress_prefix} (нет строк)")
+        return
+
+    total_chunks = len(chunks)
+    completed = 0
+
+    def run_chunk(chunk: tuple[int, int]) -> None:
+        id_from, id_to = chunk
+        params = {**shared_params, "id_from": id_from, "id_to": id_to}
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+
+    report(progress_start, f"{progress_prefix} (0/{total_chunks} чанков)")
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(run_chunk, chunk) for chunk in chunks]
+        for _ in as_completed(futures):
+            completed += 1
+            progress = progress_start + progress_span * (completed / total_chunks)
+            report(progress, f"{progress_prefix} ({completed}/{total_chunks} чанков)")
+
+
 def initialize_pg_like_dataset(
     dsn: str,
     target_size_gb: float,
+    worker_count: int | None = None,
     progress_cb: Callable[[float, str, float | None], None] | None = None,
 ) -> PgLikeSizing:
     sizing = estimate_pg_like_sizing(target_size_gb)
     started_at = time.perf_counter()
+    workers = _normalized_worker_count(worker_count)
 
     def report(progress: float, stage: str) -> None:
         if not progress_cb:
@@ -176,21 +231,29 @@ def initialize_pg_like_dataset(
             cur.execute(PG_LIKE_FILL_BRANCHES_SQL, {"branch_count": sizing.branch_count})
 
             report(0.35, "Заполнение pgbench_tellers")
-            cur.execute(
-                PG_LIKE_FILL_TELLERS_SQL,
-                {
-                    "teller_count": sizing.teller_count,
-                    "tellers_per_branch": sizing.tellers_per_branch,
-                },
+            _parallel_fill(
+                dsn=dsn,
+                sql=PG_LIKE_FILL_TELLERS_SQL,
+                chunks=_build_id_chunks(sizing.teller_count, workers),
+                workers=workers,
+                shared_params={"tellers_per_branch": sizing.tellers_per_branch},
+                progress_prefix=f"Заполнение pgbench_tellers, потоков: {workers}",
+                progress_start=0.35,
+                progress_span=0.15,
+                report=report,
             )
 
             report(0.45, "Заполнение pgbench_accounts")
-            cur.execute(
-                PG_LIKE_FILL_ACCOUNTS_SQL,
-                {
-                    "account_count": sizing.account_count,
-                    "accounts_per_branch": sizing.accounts_per_branch,
-                },
+            _parallel_fill(
+                dsn=dsn,
+                sql=PG_LIKE_FILL_ACCOUNTS_SQL,
+                chunks=_build_id_chunks(sizing.account_count, workers),
+                workers=workers,
+                shared_params={"accounts_per_branch": sizing.accounts_per_branch},
+                progress_prefix=f"Заполнение pgbench_accounts, потоков: {workers}",
+                progress_start=0.5,
+                progress_span=0.3,
+                report=report,
             )
 
             report(0.8, "ANALYZE")
@@ -225,4 +288,3 @@ def run_pg_like_tx(conn: psycopg.Connection, write_tx: bool, sizing: PgLikeSizin
                 PG_LIKE_READ_SQL,
                 {"aid_from": aid_from, "aid_to": aid_from + 49},
             )
-
