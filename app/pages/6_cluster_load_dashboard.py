@@ -5,7 +5,7 @@ import shlex
 import subprocess
 import time
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Callable
 
@@ -40,7 +40,8 @@ class ClusterConfig:
 
 def load_cluster_config(path: Path) -> ClusterConfig:
     cfg = json.loads(path.read_text(encoding="utf-8"))
-    nodes = [NodeConfig(**item) for item in cfg.get("nodes", [])]
+    allowed_keys = {field.name for field in fields(NodeConfig)}
+    nodes = [NodeConfig(**{k: v for k, v in item.items() if k in allowed_keys}) for item in cfg.get("nodes", [])]
     return ClusterConfig(nodes=nodes)
 
 
