@@ -550,32 +550,56 @@ def fetch_disk_metrics_via_ssh(node: NodeConfig) -> dict[str, float | int | None
     if not device_rows:
         return default_metrics
 
-    last_row = device_rows[-1]
-    if len(last_row) < len(headers):
-        return default_metrics
+    totals = {
+        "disk_read_kb_s_os": 0.0,
+        "disk_write_kb_s_os": 0.0,
+        "disk_io_queue": 0.0,
+        "disk_util_pct_os": 0.0,
+    }
+    found = {key: False for key in totals}
 
-    values_by_header = dict(zip(headers, last_row[1:]))
-
-    def parse_metric(candidates: list[str]) -> float | None:
+    def parse_metric(values_by_header: dict[str, str], candidates: list[str]) -> tuple[float | None, str | None]:
         for candidate in candidates:
             value = values_by_header.get(candidate)
             if value is None:
                 continue
             try:
-                return float(value)
+                return float(value), candidate
             except ValueError:
                 continue
-        return None
+        return None, None
 
-    read_kb = parse_metric(["rkB/s", "rKB/s", "kB_read/s", "rMB/s"])
-    write_kb = parse_metric(["wkB/s", "wKB/s", "kB_wrtn/s", "wMB/s"])
-    queue = parse_metric(["aqu-sz", "avgqu-sz"])
-    util = parse_metric(["%util", "util"])
+    for row in device_rows:
+        if len(row) < len(headers):
+            continue
+        values_by_header = dict(zip(headers[1:], row[1:]))
 
-    if read_kb is not None and "rMB/s" in values_by_header:
-        read_kb *= 1024
-    if write_kb is not None and "wMB/s" in values_by_header:
-        write_kb *= 1024
+        read_kb, read_key = parse_metric(values_by_header, ["rkB/s", "rKB/s", "kB_read/s", "rMB/s"])
+        write_kb, write_key = parse_metric(values_by_header, ["wkB/s", "wKB/s", "kB_wrtn/s", "wMB/s"])
+        queue, _ = parse_metric(values_by_header, ["aqu-sz", "avgqu-sz"])
+        util, _ = parse_metric(values_by_header, ["%util", "util"])
+
+        if read_kb is not None:
+            if read_key == "rMB/s":
+                read_kb *= 1024
+            totals["disk_read_kb_s_os"] += read_kb
+            found["disk_read_kb_s_os"] = True
+        if write_kb is not None:
+            if write_key == "wMB/s":
+                write_kb *= 1024
+            totals["disk_write_kb_s_os"] += write_kb
+            found["disk_write_kb_s_os"] = True
+        if queue is not None:
+            totals["disk_io_queue"] += queue
+            found["disk_io_queue"] = True
+        if util is not None:
+            totals["disk_util_pct_os"] += util
+            found["disk_util_pct_os"] = True
+
+    read_kb = totals["disk_read_kb_s_os"] if found["disk_read_kb_s_os"] else None
+    write_kb = totals["disk_write_kb_s_os"] if found["disk_write_kb_s_os"] else None
+    queue = totals["disk_io_queue"] if found["disk_io_queue"] else None
+    util = totals["disk_util_pct_os"] if found["disk_util_pct_os"] else None
 
     if read_kb is None and write_kb is None and queue is None and util is None:
         return default_metrics
@@ -775,20 +799,16 @@ def render_controls(
     for idx, node in enumerate(cluster.nodes):
         with host_cols[idx]:
             is_running = node_statuses.get(node.name) == "up"
-            button_label = "🟢 Хост запущен" if is_running else "🔴 Хост остановлен"
-            action = "stop" if is_running else "start"
+            button_label = "⏹ Остановить хост" if is_running else "🔴 Хост остановлен"
 
             st.write(f"**{node.name}** ({node.role_hint})")
-            if st.button(button_label, key=f"failure-toggle-{node.name}", use_container_width=True):
-                ok, msg = run_node_action(node, action)
-                verb = "остановка" if action == "stop" else "запуск"
-                st.toast(f"{node.name} {verb}: {'OK' if ok else 'ERR'} | {msg}")
-                st.rerun()
-
-            if st.button("🔄 Перезапуск", key=f"failure-restart-{node.name}", use_container_width=True):
-                ok, msg = run_node_action(node, "restart")
-                st.toast(f"{node.name} перезапуск: {'OK' if ok else 'ERR'} | {msg}")
-                st.rerun()
+            if is_running:
+                if st.button(button_label, key=f"failure-stop-{node.name}", use_container_width=True):
+                    ok, msg = run_node_action(node, "stop")
+                    st.toast(f"{node.name} остановка: {'OK' if ok else 'ERR'} | {msg}")
+                    st.rerun()
+            else:
+                st.button(button_label, key=f"failure-state-{node.name}", use_container_width=True, disabled=True)
 
 
 def reset_server_stats(cluster: ClusterConfig) -> None:
