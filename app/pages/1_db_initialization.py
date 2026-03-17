@@ -20,6 +20,7 @@ if "db_init_state" not in st.session_state:
         "progress": 0.0,
         "stage": "Ожидание",
         "eta_sec": None,
+        "eta_updated_at": None,
         "started_at": None,
         "error": None,
         "result": None,
@@ -62,6 +63,7 @@ def run_init() -> None:
     state["progress"] = 0.0
     state["stage"] = "Запуск"
     state["eta_sec"] = None
+    state["eta_updated_at"] = None
     state["started_at"] = time.time()
     state["error"] = None
     state["result"] = None
@@ -70,6 +72,7 @@ def run_init() -> None:
         state["progress"] = max(0.0, min(1.0, progress))
         state["stage"] = stage
         state["eta_sec"] = eta_sec
+        state["eta_updated_at"] = time.time() if eta_sec is not None else None
 
     try:
         result = initialize_pg_like_dataset(
@@ -93,8 +96,10 @@ if st.button("Старт создания/наполнения БД", type="prim
 if state["running"]:
     st.progress(float(state["progress"]), text=f"{state['stage']}")
     eta = state.get("eta_sec")
-    if eta is not None:
-        st.caption(f"Осталось примерно: {int(max(0, eta))} сек")
+    eta_updated_at = state.get("eta_updated_at")
+    if eta is not None and eta_updated_at is not None:
+        countdown_eta = max(0, eta - (time.time() - eta_updated_at))
+        st.caption(f"Осталось примерно: {int(countdown_eta)} сек")
     st.caption("Процесс выполняется...")
     time.sleep(1)
     st.rerun()
