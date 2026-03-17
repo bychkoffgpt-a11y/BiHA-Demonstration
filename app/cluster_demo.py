@@ -781,8 +781,14 @@ def render_sidebar() -> dict[str, Any]:
         value=int(threads_per_client),
     )
 
-    total_workers = min(MAX_WORKERS, int(clients) * int(threads_per_client))
-    st.sidebar.caption(f"Итого рабочих потоков генератора: {total_workers} (лимит: {MAX_WORKERS})")
+    requested_workers = int(clients) * int(threads_per_client)
+    total_workers = min(MAX_WORKERS, requested_workers)
+    if requested_workers > MAX_WORKERS:
+        st.sidebar.caption(
+            f"Итого рабочих потоков генератора: {total_workers} из {requested_workers} (лимит: {MAX_WORKERS})"
+        )
+    else:
+        st.sidebar.caption(f"Итого рабочих потоков генератора: {total_workers}")
     read_ratio = st.sidebar.slider("Доля чтения (Read ratio)", 0.0, 1.0, step=0.05, key="load_read_ratio")
     auto_refresh = st.sidebar.checkbox("Автообновление (Auto-refresh)", key="load_auto_refresh")
 
@@ -1019,10 +1025,18 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: Bac
         st.warning("Нет подключений к узлам БД. Проверьте доступность PostgreSQL и параметры DSN/SSH в конфиге.")
     stats = wg.stats_snapshot()
     st.info(f"Статус генератора нагрузки (Load generator status): {'🟢 РАБОТАЕТ' if wg.running else '🔴 ОСТАНОВЛЕН'}")
+    clients = int(st.session_state.get("load_clients", 1))
+    threads_per_client = int(st.session_state.get("load_threads_per_client", 1))
+    requested_workers = clients * threads_per_client
+    actual_workers = min(MAX_WORKERS, requested_workers)
+    workers_caption = f"рабочих потоков={actual_workers}"
+    if requested_workers > MAX_WORKERS:
+        workers_caption += f" из {requested_workers} (лимит: {MAX_WORKERS})"
+
     st.caption(
-        f"Параметры нагрузки: клиентов={st.session_state.get('load_clients', 1)}, "
-        f"потоков на клиента={st.session_state.get('load_threads_per_client', 1)}, "
-        f"рабочих потоков={min(MAX_WORKERS, int(st.session_state.get('load_clients', 1)) * int(st.session_state.get('load_threads_per_client', 1)))}"
+        f"Параметры нагрузки: клиентов={clients}, "
+        f"потоков на клиента={threads_per_client}, "
+        f"{workers_caption}"
     )
 
     st.subheader("Статистика нагрузки (Load stats)")
