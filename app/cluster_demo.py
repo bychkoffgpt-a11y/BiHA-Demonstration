@@ -996,6 +996,10 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: Bac
         }
     )
     if not localized_df.empty:
+        if {"Role", "Replay delay, sec"}.issubset(localized_df.columns):
+            master_mask = localized_df["Role"].astype(str).str.lower().isin({"master", "primary", "leader"})
+            localized_df.loc[master_mask, "Replay delay, sec"] = "—"
+
         numeric_columns = [
             "Replay delay, sec",
             "Active locks",
