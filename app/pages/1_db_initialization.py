@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+import os
 from pathlib import Path
 
 import streamlit as st
@@ -28,6 +29,15 @@ state = st.session_state.db_init_state
 
 cfg_path = Path(st.text_input("Путь к конфигу (Path to config)", "config/cluster.json"))
 target_size_gb = st.number_input("Целевой размер БД, ГБ", min_value=0.1, max_value=500.0, value=1.0, step=0.1)
+cpu_count = os.cpu_count() or 1
+workers = st.number_input(
+    "Количество потоков заполнения",
+    min_value=1,
+    max_value=cpu_count,
+    value=min(4, cpu_count),
+    step=1,
+    help=f"Не более числа ядер сервера приложения ({cpu_count}).",
+)
 
 cluster = None
 node = None
@@ -62,7 +72,12 @@ def run_init() -> None:
         state["eta_sec"] = eta_sec
 
     try:
-        result = initialize_pg_like_dataset(node.dsn, float(target_size_gb), progress_cb=cb)
+        result = initialize_pg_like_dataset(
+            node.dsn,
+            float(target_size_gb),
+            worker_count=int(workers),
+            progress_cb=cb,
+        )
         state["result"] = result
     except Exception as exc:
         state["error"] = str(exc)
