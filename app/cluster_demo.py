@@ -30,6 +30,8 @@ MAX_WORKERS = 64
 METRICS_FETCH_WORKERS = 8
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 LOGGER = setup_file_logger()
+WORKLOAD_LOCK_TIMEOUT_MS = 1_500
+WORKLOAD_STATEMENT_TIMEOUT_MS = 8_000
 
 
 @dataclass
@@ -348,6 +350,10 @@ def select_node_for_workload(nodes: list[NodeConfig], mode: str, write_tx: bool)
 
 def execute_workload_tx(node: NodeConfig, write_tx: bool, sizing: PgLikeSizing) -> None:
     with psycopg.connect(node.dsn, connect_timeout=2, autocommit=False) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SET LOCAL lock_timeout = '{WORKLOAD_LOCK_TIMEOUT_MS}ms'")
+            cur.execute(f"SET LOCAL statement_timeout = '{WORKLOAD_STATEMENT_TIMEOUT_MS}ms'")
+            cur.execute("SET LOCAL idle_in_transaction_session_timeout = '10s'")
         run_pg_like_tx(conn, write_tx, sizing)
         conn.commit()
 
