@@ -201,26 +201,40 @@ def fetch_snapshot(primary: NodeConfig, standby: NodeConfig | None, target_db: s
 
 
 def fetch_cpu_pct(node: NodeConfig) -> float | None:
-    cpu_cmd = (
-        "bash -lc \""
-        "read -r _ u1 n1 s1 i1 iw1 irq1 sirq1 st1 _ < /proc/stat; "
-        "t1=$((u1+n1+s1+i1+iw1+irq1+sirq1+st1)); "
-        "idle1=$((i1+iw1)); "
-        "sleep 1; "
-        "read -r _ u2 n2 s2 i2 iw2 irq2 sirq2 st2 _ < /proc/stat; "
-        "t2=$((u2+n2+s2+i2+iw2+irq2+sirq2+st2)); "
-        "idle2=$((i2+iw2)); "
-        "dt=$((t2-t1)); didle=$((idle2-idle1)); "
-        "awk -v dt=$dt -v di=$didle 'BEGIN {if (dt<=0) print 0; else printf \\\"%.2f\\\", (dt-di)*100/dt}'"
-        "\""
-    )
-    output = run_ssh_metric(node, cpu_cmd)
+    output = run_ssh_metric(node, 'bash -lc "grep -m1 \'^cpu \' /proc/stat; sleep 1; grep -m1 \'^cpu \' /proc/stat"')
     if output is None:
         return None
-    try:
-        return float(output.replace(",", "."))
-    except ValueError:
+
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if len(lines) < 2:
+        LOGGER.warning("CPU metric parse failed: expected 2 lines | node=%s output=%r", node.name, output)
         return None
+
+    def parse_cpu_line(line: str) -> tuple[float, float] | None:
+        parts = line.split()
+        if len(parts) < 8 or parts[0] != "cpu":
+            return None
+        try:
+            counters = [float(value) for value in parts[1:] if value]
+        except ValueError:
+            return None
+        total = sum(counters)
+        idle = counters[3] + counters[4] if len(counters) > 4 else counters[3]
+        return total, idle
+
+    first = parse_cpu_line(lines[0])
+    second = parse_cpu_line(lines[1])
+    if first is None or second is None:
+        LOGGER.warning("CPU metric parse failed: malformed /proc/stat | node=%s output=%r", node.name, output)
+        return None
+
+    total_delta = second[0] - first[0]
+    idle_delta = second[1] - first[1]
+    if total_delta <= 0:
+        return None
+
+    usage = (total_delta - idle_delta) * 100.0 / total_delta
+    return max(0.0, min(100.0, round(usage, 2)))
 
 
 def fetch_disk_latency(node: NodeConfig) -> dict[str, float | None]:
