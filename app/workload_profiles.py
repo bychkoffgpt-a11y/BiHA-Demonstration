@@ -72,7 +72,8 @@ ORDER BY aid
 LIMIT 50;
 """.strip()
 
-PG_LIKE_WRITE_SQL = """
+PG_LIKE_WRITE_SQL_STMTS = (
+    """
 WITH sel AS (
     SELECT floor(random() * %(account_count)s + 1)::int AS aid,
            floor(random() * %(teller_count)s + 1)::int AS tid,
@@ -82,7 +83,9 @@ WITH sel AS (
 UPDATE pgbench_accounts a
 SET abalance = a.abalance + sel.delta
 FROM sel
-WHERE a.aid = sel.aid;
+WHERE a.aid = sel.aid
+""".strip(),
+    """
 
 WITH sel AS (
     SELECT floor(random() * %(teller_count)s + 1)::int AS tid,
@@ -92,7 +95,9 @@ WITH sel AS (
 UPDATE pgbench_tellers t
 SET tbalance = t.tbalance + sel.delta
 FROM sel
-WHERE t.tid = sel.tid;
+WHERE t.tid = sel.tid
+""".strip(),
+    """
 
 WITH sel AS (
     SELECT floor(random() * %(branch_count)s + 1)::int AS bid,
@@ -101,14 +106,19 @@ WITH sel AS (
 UPDATE pgbench_branches b
 SET bbalance = b.bbalance + sel.delta
 FROM sel
-WHERE b.bid = sel.bid;
+WHERE b.bid = sel.bid
+""".strip(),
+    """
 
 INSERT INTO pgbench_history (tid, bid, aid, delta)
 SELECT floor(random() * %(teller_count)s + 1)::int,
        floor(random() * %(branch_count)s + 1)::int,
        floor(random() * %(account_count)s + 1)::int,
-       floor(random() * 2000 - 1000)::int;
-""".strip()
+       floor(random() * 2000 - 1000)::int
+""".strip(),
+)
+
+PG_LIKE_WRITE_SQL = ";\n\n".join(PG_LIKE_WRITE_SQL_STMTS) + ";"
 
 
 @dataclass
@@ -201,14 +211,13 @@ def initialize_pg_like_dataset(
 def run_pg_like_tx(conn: psycopg.Connection, write_tx: bool, sizing: PgLikeSizing) -> None:
     with conn.cursor() as cur:
         if write_tx:
-            cur.execute(
-                PG_LIKE_WRITE_SQL,
-                {
-                    "account_count": sizing.account_count,
-                    "teller_count": sizing.teller_count,
-                    "branch_count": sizing.branch_count,
-                },
-            )
+            params = {
+                "account_count": sizing.account_count,
+                "teller_count": sizing.teller_count,
+                "branch_count": sizing.branch_count,
+            }
+            for statement in PG_LIKE_WRITE_SQL_STMTS:
+                cur.execute(statement, params)
         else:
             upper = max(50, sizing.account_count)
             aid_from = random.randint(1, upper - 49)
@@ -216,5 +225,4 @@ def run_pg_like_tx(conn: psycopg.Connection, write_tx: bool, sizing: PgLikeSizin
                 PG_LIKE_READ_SQL,
                 {"aid_from": aid_from, "aid_to": aid_from + 49},
             )
-
 
