@@ -882,28 +882,25 @@ def render_controls(
     collector: BackgroundMetricsCollector,
 ) -> None:
     st.subheader("Управление сценарием (Scenario controls)")
-    scenario_cols = st.columns(5)
+    scenario_cols = st.columns([1.2, 3.8])
 
-    if scenario_cols[0].button("▶ Start load", use_container_width=True, key="scenario_start_load"):
-        wg.start(
-            cluster,
-            profile["mode"],
-            int(profile["clients"]),
-            int(profile["threads_per_client"]),
-            float(profile["read_ratio"]),
+    if scenario_cols[0].button("🔄 Reset counters", use_container_width=True, key="scenario_reset_counters"):
+        st.session_state["confirm_reset_counters"] = True
+
+    if st.session_state.get("confirm_reset_counters", False):
+        st.warning(
+            "Подтвердите сброс серверной статистики на всех узлах кластера. "
+            "Будут предприняты попытки очистки счётчиков pg_stat_database и связанных shared статистик."
         )
-        st.rerun()
-    if scenario_cols[1].button("⏹ Stop load", use_container_width=True, key="scenario_stop_load"):
-        wg.stop()
-        st.rerun()
-    if scenario_cols[2].button("🔄 Reset counters", use_container_width=True, key="scenario_reset_counters"):
-        wg.reset_stats()
-        st.rerun()
-    if scenario_cols[3].button("🧹 Reset server stats", use_container_width=True, key="scenario_reset_server_stats"):
-        reset_server_stats(cluster)
-        st.rerun()
-    if scenario_cols[4].button("⟳ Refresh now", use_container_width=True, key="scenario_refresh_now"):
-        st.rerun()
+        confirm_cols = st.columns([1, 1, 3])
+        if confirm_cols[0].button("✅ Да, сбросить", key="confirm_reset_yes", use_container_width=True):
+            wg.reset_stats()
+            reset_server_stats(cluster)
+            st.session_state["confirm_reset_counters"] = False
+            st.rerun()
+        if confirm_cols[1].button("❌ Отмена", key="confirm_reset_no", use_container_width=True):
+            st.session_state["confirm_reset_counters"] = False
+            st.rerun()
 
     st.markdown("#### Управление хостами (Host controls)")
 
@@ -928,18 +925,36 @@ def render_controls(
 
 def reset_server_stats(cluster: ClusterConfig) -> None:
     failures: list[str] = []
+    notes: list[str] = []
+    reset_statements = [
+        "SELECT pg_stat_reset()",
+        "SELECT pg_stat_reset_shared('bgwriter')",
+        "SELECT pg_stat_reset_shared('wal')",
+    ]
+
     for node in cluster.nodes:
         try:
             with psycopg.connect(node.dsn, connect_timeout=2, autocommit=True) as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT pg_stat_reset()")
+                    for stmt in reset_statements:
+                        try:
+                            cur.execute(stmt)
+                        except Exception as stmt_exc:
+                            notes.append(f"{node.name}: {stmt} -> {stmt_exc}")
         except Exception as exc:
             failures.append(f"{node.name}: {exc}")
+
+    notes.append(
+        "pg_stat_activity, pg_locks и pg_last_xact_replay_timestamp не имеют прямого reset API; "
+        "их значения изменяются только состоянием кластера и активными сессиями."
+    )
 
     if failures:
         st.warning("Не удалось сбросить статистику (Failed to reset stats): " + "; ".join(failures))
     else:
         st.success("Серверная статистика сброшена (Server statistics reset).")
+    if notes:
+        st.info("Примечания по сбросу (Reset notes): " + " | ".join(notes))
 
 
 def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: BackgroundMetricsCollector) -> None:
@@ -1023,8 +1038,23 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: Bac
             {row.get("node"): row.get("error") for row in rows},
         )
         st.warning("Нет подключений к узлам БД. Проверьте доступность PostgreSQL и параметры DSN/SSH в конфиге.")
-    stats = wg.stats_snapshot()
-    st.info(f"Статус генератора нагрузки (Load generator status): {'🟢 РАБОТАЕТ' if wg.running else '🔴 ОСТАНОВЛЕН'}")
+    status_cols = st.columns([4.6, 1.4])
+    with status_cols[0]:
+        st.info(f"Статус генератора нагрузки (Load generator status): {'🟢 РАБОТАЕТ' if wg.running else '🔴 ОСТАНОВЛЕН'}")
+    with status_cols[1]:
+        toggle_label = "🟢 Stop load" if wg.running else "🔴 Start load"
+        if st.button(toggle_label, key="status_toggle_load", use_container_width=True):
+            if wg.running:
+                wg.stop()
+            else:
+                wg.start(
+                    cluster,
+                    st.session_state.get("load_mode", "single-node"),
+                    int(st.session_state.get("load_clients", 1)),
+                    int(st.session_state.get("load_threads_per_client", 1)),
+                    float(st.session_state.get("load_read_ratio", 0.7)),
+                )
+            st.rerun()
     clients = int(st.session_state.get("load_clients", 1))
     threads_per_client = int(st.session_state.get("load_threads_per_client", 1))
     requested_workers = clients * threads_per_client
@@ -1104,6 +1134,10 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: Bac
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     apply_compact_top_styles()
+    top_bar_cols = st.columns([8.8, 1.2])
+    with top_bar_cols[1]:
+        if st.button("⟳", key="scenario_refresh_now", help="Refresh now"):
+            st.rerun()
     st.title(APP_TITLE)
     st.caption("Демо-интерфейс для проверки кластера BiHA PostgreSQL Pro (Demo GUI for BiHA PostgreSQL Pro cluster validation)")
 
