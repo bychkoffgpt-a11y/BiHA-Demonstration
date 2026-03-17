@@ -1048,20 +1048,6 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: Bac
     history = collector.history_snapshot()
     hist_df = pd.DataFrame(history)
     if not hist_df.empty:
-        disk_cols: list[str] = []
-        for node in cluster.nodes:
-            disk_cols.extend(
-                [
-                    f"disk_read_latency_{node.name}",
-                    f"disk_write_latency_{node.name}",
-                    f"disk_queue_{node.name}",
-                    f"disk_read_kb_s_{node.name}",
-                    f"disk_write_kb_s_{node.name}",
-                    f"disk_util_pct_{node.name}",
-                ]
-            )
-        disk_cols = [col for col in disk_cols if col in hist_df.columns]
-
         chart_df = hist_df.set_index("ts")
         query_error_cols = ["read_tx", "write_tx", "errors"]
         query_error_moment_df = chart_df[query_error_cols].diff().clip(lower=0).fillna(0)
@@ -1079,12 +1065,37 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: Bac
 
         with chart_cols[2]:
             st.caption("Нагрузка на диски по узлам (Disk load per node)")
-            if disk_cols:
-                st.line_chart(chart_df[disk_cols], height=320)
+            role_aliases = {
+                "master": {"master", "primary", "leader"},
+                "slave": {"slave", "replica", "standby"},
+            }
+
+            role_nodes: dict[str, NodeConfig | None] = {"master": None, "slave": None}
+            for node in cluster.nodes:
+                normalized_role = node.role_hint.strip().lower()
+                for role, aliases in role_aliases.items():
+                    if role_nodes[role] is None and normalized_role in aliases:
+                        role_nodes[role] = node
+
+            disk_chart_data: dict[str, pd.Series] = {}
+            for role, node in role_nodes.items():
+                if not node:
+                    continue
+
+                read_col = f"disk_read_kb_s_{node.name}"
+                write_col = f"disk_write_kb_s_{node.name}"
+
+                if read_col in chart_df.columns:
+                    disk_chart_data[f"{role}_read_kb_s"] = chart_df[read_col]
+                if write_col in chart_df.columns:
+                    disk_chart_data[f"{role}_write_kb_s"] = chart_df[write_col]
+
+            if disk_chart_data:
+                disk_chart_df = pd.DataFrame(disk_chart_data, index=chart_df.index)
+                st.line_chart(disk_chart_df, height=320)
                 st.caption(
-                    "Источник данных: SSH iostat -dx и PostgreSQL. "
-                    "Ось Y: значения в исходной размерности метрик "
-                    "(latency — ms, read/write — KB/s, util — %, queue — средняя длина очереди)."
+                    "Источник данных: SSH iostat -dx. "
+                    "Ось Y: скорость чтения/записи диска в KB/s для master и slave узлов."
                 )
             else:
                 st.info("Пока нет данных по дискам")
