@@ -652,22 +652,24 @@ def render_dashboard() -> None:
             render_wal_chart,
         ]
 
-        if compact_grid:
-            for idx in range(0, len(charts), 2):
-                row_cols = st.columns(2)
-                for col, chart_renderer in zip(row_cols, charts[idx : idx + 2], strict=False):
+        charts_container = st.empty()
+        with charts_container.container():
+            if compact_grid:
+                for idx in range(0, len(charts), 2):
+                    row_cols = st.columns(2)
+                    for col, chart_renderer in zip(row_cols, charts[idx : idx + 2], strict=False):
+                        with col:
+                            chart_renderer()
+            else:
+                first_row = st.columns(4)
+                for col, chart_renderer in zip(first_row, charts[:4], strict=True):
                     with col:
                         chart_renderer()
-        else:
-            first_row = st.columns(4)
-            for col, chart_renderer in zip(first_row, charts[:4], strict=True):
-                with col:
-                    chart_renderer()
-    
-            second_row = st.columns(2)
-            for col, chart_renderer in zip(second_row, charts[4:], strict=True):
-                with col:
-                    chart_renderer()
+
+                second_row = st.columns(2)
+                for col, chart_renderer in zip(second_row, charts[4:], strict=True):
+                    with col:
+                        chart_renderer()
 
     if auto_refresh:
         st.caption("Сбор метрик выполняется в фоновом потоке. Интерфейс обновляется отдельно.")
