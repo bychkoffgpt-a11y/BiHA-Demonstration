@@ -742,7 +742,12 @@ def apply_compact_top_styles() -> None:
     )
 
 
-def render_controls(cluster: ClusterConfig, wg: WorkloadGenerator, profile: dict[str, Any]) -> None:
+def render_controls(
+    cluster: ClusterConfig,
+    wg: WorkloadGenerator,
+    profile: dict[str, Any],
+    collector: BackgroundMetricsCollector,
+) -> None:
     st.subheader("Управление сценарием (Scenario controls)")
     scenario_cols = st.columns(5)
 
@@ -761,23 +766,29 @@ def render_controls(cluster: ClusterConfig, wg: WorkloadGenerator, profile: dict
     if scenario_cols[4].button("⟳ Refresh now", use_container_width=True, key="scenario_refresh_now"):
         st.rerun()
 
-    st.markdown("#### Симуляция отказа (Failure simulation)")
+    st.markdown("#### Управление хостами (Host controls)")
 
-    for node in cluster.nodes:
-        c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
-        c1.write(f"**{node.name}** ({node.role_hint})")
-        if c2.button("Stop", key=f"failure-stop-{node.name}", use_container_width=True):
-            ok, msg = run_node_action(node, "stop")
-            st.toast(f"{node.name} stop: {'OK' if ok else 'ERR'} | {msg}")
-            st.rerun()
-        if c3.button("Start", key=f"failure-start-{node.name}", use_container_width=True):
-            ok, msg = run_node_action(node, "start")
-            st.toast(f"{node.name} start: {'OK' if ok else 'ERR'} | {msg}")
-            st.rerun()
-        if c4.button("Restart", key=f"failure-restart-{node.name}", use_container_width=True):
-            ok, msg = run_node_action(node, "restart")
-            st.toast(f"{node.name} restart: {'OK' if ok else 'ERR'} | {msg}")
-            st.rerun()
+    snapshot_rows = collector.snapshot().get("rows", [])
+    node_statuses = {row.get("node"): row.get("status") for row in snapshot_rows}
+    host_cols = st.columns(len(cluster.nodes))
+
+    for idx, node in enumerate(cluster.nodes):
+        with host_cols[idx]:
+            is_running = node_statuses.get(node.name) == "up"
+            button_label = "🟢 Хост запущен" if is_running else "🔴 Хост остановлен"
+            action = "stop" if is_running else "start"
+
+            st.write(f"**{node.name}** ({node.role_hint})")
+            if st.button(button_label, key=f"failure-toggle-{node.name}", use_container_width=True):
+                ok, msg = run_node_action(node, action)
+                verb = "остановка" if action == "stop" else "запуск"
+                st.toast(f"{node.name} {verb}: {'OK' if ok else 'ERR'} | {msg}")
+                st.rerun()
+
+            if st.button("🔄 Перезапуск", key=f"failure-restart-{node.name}", use_container_width=True):
+                ok, msg = run_node_action(node, "restart")
+                st.toast(f"{node.name} перезапуск: {'OK' if ok else 'ERR'} | {msg}")
+                st.rerun()
 
 
 def reset_server_stats(cluster: ClusterConfig) -> None:
@@ -962,7 +973,7 @@ def main() -> None:
     else:
         collector.set_mode(profile["mode"])
 
-    render_controls(cluster, wg, profile)
+    render_controls(cluster, wg, profile, collector)
     render_metrics(cluster, wg, collector)
 
     st.divider()
