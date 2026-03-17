@@ -590,26 +590,13 @@ session_key = f"{primary.name}|{standby.name if standby else 'none'}|{target_db}
 collector = get_async_collector(session_key, interval_sec, history_limit)
 collector.update(interval_sec=interval_sec, history_limit=history_limit)
 
-sessions_collector = get_async_collector(f"sessions|{session_key}", interval_sec, history_limit)
-sessions_collector.update(interval_sec=interval_sec, history_limit=history_limit)
-
-cpu_interval_sec = min(interval_sec + 2, 30)
-cpu_collector = get_async_collector(f"cpu|{session_key}", cpu_interval_sec, history_limit)
-cpu_collector.update(interval_sec=cpu_interval_sec, history_limit=history_limit)
-
 if auto_refresh:
     collector.start(lambda: fetch_snapshot(primary, standby, target_db))
-    sessions_collector.start(lambda: fetch_sessions_snapshot(primary), start_delay_sec=0.3)
-    cpu_collector.start(lambda: fetch_cpu_snapshot(primary, standby), start_delay_sec=0.9)
 
 if st.button("Снять новый срез", type="primary", width="stretch"):
     collector.collect_once(lambda: fetch_snapshot(primary, standby, target_db))
-    sessions_collector.collect_once(lambda: fetch_sessions_snapshot(primary))
-    cpu_collector.collect_once(lambda: fetch_cpu_snapshot(primary, standby))
 
 series = build_timeseries(collector.history(), window_minutes)
-sessions_df = build_sessions_df(sessions_collector.history(), window_minutes)
-cpu_df = build_cpu_df(cpu_collector.history(), window_minutes)
 if not series:
     st.info("Соберите минимум два среза метрик для отображения графиков.")
 else:
@@ -621,7 +608,7 @@ else:
     with slots[1]:
         line_chart(series["latency"], "metric", "мс", "Latency p95 (мс)", alt.Scale(zero=True))
     with slots[2]:
-        sessions_df = sessions_df.dropna(subset=["value"])
+        sessions_df = series["sessions"].dropna(subset=["value"])
         if sessions_df.empty:
             st.info("Недостаточно данных")
         else:
@@ -638,7 +625,7 @@ else:
             )
             st.altair_chart(theme_chart(chart), width="stretch")
     with slots[3]:
-        line_chart(cpu_df, "node", "%", "CPU primary / standby (%)", alt.Scale(domain=[0, 100]))
+        line_chart(series["cpu"], "node", "%", "CPU primary / standby (%)", alt.Scale(domain=[0, 100]))
     with slots[4]:
         line_chart(series["disk"], "metric", "мс", "Disk latency (Primary, мс)", alt.Scale(zero=True))
     with slots[5]:
@@ -655,5 +642,3 @@ if auto_refresh:
         st_autorefresh(interval=1000, key=f"cluster-load-refresh-{session_key}")
 else:
     collector.stop()
-    sessions_collector.stop()
-    cpu_collector.stop()
