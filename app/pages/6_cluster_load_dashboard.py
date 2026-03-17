@@ -4,6 +4,7 @@ import json
 import shlex
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Callable
@@ -511,7 +512,9 @@ else:
 if auto_refresh:
     st.caption("Сбор метрик выполняется в фоновом потоке. Интерфейс обновляется отдельно.")
     if st_autorefresh is None:
-        st.warning("streamlit-autorefresh не установлен: автообновление интерфейса отключено.")
+        st.info("streamlit-autorefresh не установлен: используется встроенное автообновление Streamlit.")
+        time.sleep(1)
+        st.rerun()
     else:
         st_autorefresh(interval=1000, key=f"cluster-load-refresh-{session_key}")
 else:
