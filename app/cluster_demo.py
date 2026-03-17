@@ -326,7 +326,7 @@ def select_node_for_workload(nodes: list[NodeConfig], mode: str, write_tx: bool)
 
     fallback_node = nodes[0] if nodes else None
 
-    if mode == "single-node":
+    if mode in {"single-node", "master-rw"}:
         return masters[0] if masters else fallback_node
 
     if mode == "dual-read":
@@ -735,7 +735,7 @@ def render_sidebar() -> dict[str, Any]:
     st.sidebar.header("Профиль нагрузки (Load profile)")
 
     defaults = {
-        "load_mode": "single-node",
+        "load_mode": "master-rw",
         "load_clients": 10,
         "load_threads_per_client": 1,
         "load_read_ratio": 0.7,
@@ -762,8 +762,13 @@ def render_sidebar() -> dict[str, Any]:
 
     mode = st.sidebar.selectbox(
         "Режим (Mode)",
-        options=["single-node", "dual-read", "master-rw-slave-r"],
-        help="single-node: вся нагрузка на master; dual-read: чтение с обеих; master-rw-slave-r: запись на master, чтение с slave",
+        options=["master-rw", "dual-read", "master-rw-slave-r", "single-node"],
+        help=(
+            "master-rw: чтение и запись только на master; "
+            "dual-read: запись на master, чтение с обеих; "
+            "master-rw-slave-r: запись на master, чтение преимущественно со slave; "
+            "single-node: legacy-алиас master-rw"
+        ),
         key="load_mode",
     )
     clients = st.sidebar.slider("Количество клиентов", min_value=1, max_value=64, step=1, key="load_clients")
@@ -882,8 +887,11 @@ def render_controls(
     collector: BackgroundMetricsCollector,
 ) -> None:
     st.subheader("Управление сценарием (Scenario controls)")
-    if st.button("🔄 Reset counters", use_container_width=True, key="scenario_reset_counters"):
+    actions_col1, actions_col2 = st.columns(2)
+    if actions_col1.button("🔄 Reset counters", use_container_width=True, key="scenario_reset_counters"):
         st.session_state["confirm_reset_counters"] = True
+    if actions_col2.button("🧹 Reset all caches", use_container_width=True, key="scenario_reset_caches"):
+        st.session_state["confirm_reset_caches"] = True
 
     if st.session_state.get("confirm_reset_counters", False):
         with st.container(border=True):
@@ -899,6 +907,21 @@ def render_controls(
                 st.rerun()
             if confirm_cols[1].button("❌ Отмена", key="confirm_reset_no", use_container_width=True):
                 st.session_state["confirm_reset_counters"] = False
+                st.rerun()
+
+    if st.session_state.get("confirm_reset_caches", False):
+        with st.container(border=True):
+            st.warning(
+                "Подтвердите очистку page cache/dentries/inodes на всех нодах кластера. "
+                "Операция требует sudo без пароля и может временно ухудшить производительность."
+            )
+            confirm_cols = st.columns(2)
+            if confirm_cols[0].button("✅ Да, очистить кэши", key="confirm_reset_caches_yes", use_container_width=True):
+                reset_all_node_caches(cluster)
+                st.session_state["confirm_reset_caches"] = False
+                st.rerun()
+            if confirm_cols[1].button("❌ Отмена", key="confirm_reset_caches_no", use_container_width=True):
+                st.session_state["confirm_reset_caches"] = False
                 st.rerun()
 
     st.markdown("#### Управление хостами (Host controls)")
@@ -954,6 +977,47 @@ def reset_server_stats(cluster: ClusterConfig) -> None:
         st.success("Серверная статистика сброшена (Server statistics reset).")
     if notes:
         st.info("Примечания по сбросу (Reset notes): " + " | ".join(notes))
+
+
+def reset_all_node_caches(cluster: ClusterConfig) -> None:
+    failures: list[str] = []
+    successes: list[str] = []
+
+    for node in cluster.nodes:
+        ok, msg = run_node_action_via_ssh(node, 'sudo -n sh -c "sync; echo 3 > /proc/sys/vm/drop_caches"', timeout=20)
+        if ok:
+            successes.append(node.name)
+        else:
+            failures.append(f"{node.name}: {msg}")
+
+    if successes:
+        st.success("Кэши очищены на нодах: " + ", ".join(successes))
+    if failures:
+        st.warning("Не удалось очистить кэши: " + "; ".join(failures))
+
+
+def run_node_action_via_ssh(node: NodeConfig, remote_cmd: str, timeout: int = 15) -> tuple[bool, str]:
+    if not node.control_via_ssh or not node.ssh_host:
+        return False, "SSH control disabled for this node in config"
+
+    cmd = build_ssh_command(node, remote_cmd)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        LOGGER.error("SSH action timeout for node=%s cmd=%s", node.name, remote_cmd)
+        return False, "SSH command timeout"
+
+    output = (proc.stdout + "\n" + proc.stderr).strip()
+    ok = proc.returncode == 0
+    if not ok:
+        LOGGER.error(
+            "SSH action failed for node=%s cmd=%s returncode=%s output=%s",
+            node.name,
+            remote_cmd,
+            proc.returncode,
+            output or "<empty>",
+        )
+    return ok, output or "OK"
 
 
 def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: BackgroundMetricsCollector) -> None:
@@ -1052,7 +1116,7 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: Bac
             else:
                 wg.start(
                     cluster,
-                    st.session_state.get("load_mode", "single-node"),
+                    st.session_state.get("load_mode", "master-rw"),
                     int(st.session_state.get("load_clients", 1)),
                     int(st.session_state.get("load_threads_per_client", 1)),
                     float(st.session_state.get("load_read_ratio", 0.7)),
