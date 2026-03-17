@@ -67,11 +67,12 @@ FROM generate_series(%(id_from)s, %(id_to)s) AS gs;
 """.strip()
 
 PG_LIKE_READ_SQL = """
-SELECT aid, bid, abalance
+SELECT
+    count(*) AS scanned_rows,
+    sum(abalance) AS balance_sum,
+    sum(length(filler)) AS filler_bytes
 FROM pgbench_accounts
-WHERE aid BETWEEN %(aid_from)s AND %(aid_to)s
-ORDER BY aid
-LIMIT 50;
+WHERE (aid %% %(bucket_count)s) = %(bucket_id)s;
 """.strip()
 
 PG_LIKE_WRITE_SQL_STMTS = (
@@ -282,9 +283,11 @@ def run_pg_like_tx(conn: psycopg.Connection, write_tx: bool, sizing: PgLikeSizin
             for statement in PG_LIKE_WRITE_SQL_STMTS:
                 cur.execute(statement, params)
         else:
-            upper = max(50, sizing.account_count)
-            aid_from = random.randint(1, upper - 49)
+            bucket_count = min(64, max(8, sizing.account_count // 10000))
             cur.execute(
                 PG_LIKE_READ_SQL,
-                {"aid_from": aid_from, "aid_to": aid_from + 49},
+                {
+                    "bucket_count": bucket_count,
+                    "bucket_id": random.randint(0, bucket_count - 1),
+                },
             )
