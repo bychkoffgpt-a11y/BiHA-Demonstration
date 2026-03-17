@@ -10,6 +10,7 @@
 - инициализирует и наполняет БД до целевого размера в ГБ на отдельной странице с прогрессом и ETA;
 - показывает SQL-логи транзакций генератора на отдельной странице, чтобы не уменьшать графики на главном экране;
 - позволяет запускать failover-сценарии через SSH (`start/stop/restart` сервиса PostgreSQL).
+- собирает метрики дисковой нагрузки узлов напрямую из ОС по SSH (`iostat`) для отображения на графиках.
 
 > В этом репозитории **не требуется Kubernetes, Helm, Prometheus и Grafana**.
 
@@ -21,7 +22,8 @@
 
 - Python 3.10+
 - доступ к PostgreSQL-узлам (master/slave)
-- (опционально) SSH-доступ до хостов БД для кнопок управления сервисом
+- (опционально) SSH-доступ до хостов БД для кнопок управления сервисом и сбора дисковых метрик ОС
+- (рекомендуется) `sysstat` (`iostat`) на узлах БД для метрик дисковой нагрузки из ОС
 
 ### 2) Установка зависимостей
 
@@ -68,7 +70,8 @@ streamlit run app/cluster_demo.py
       "ssh_identity_file": "/home/appuser/.ssh/id_ed25519",
       "ssh_legacy_algorithms": false,
       "ssh_extra_options": ["ServerAliveInterval=15", "ServerAliveCountMax=3"],
-      "service_name": "postgrespro"
+      "service_name": "postgrespro",
+      "collect_disk_metrics_via_ssh": true
     },
     {
       "name": "node2-slave",
@@ -81,7 +84,8 @@ streamlit run app/cluster_demo.py
       "ssh_identity_file": "/home/appuser/.ssh/id_ed25519",
       "ssh_legacy_algorithms": false,
       "ssh_extra_options": ["ServerAliveInterval=15", "ServerAliveCountMax=3"],
-      "service_name": "postgrespro"
+      "service_name": "postgrespro",
+      "collect_disk_metrics_via_ssh": true
     }
   ]
 }
@@ -92,7 +96,8 @@ streamlit run app/cluster_demo.py
 - фактическая роль (master/slave) определяется запросом `pg_is_in_recovery()`;
 - `ssh_port`, `ssh_identity_file`, `ssh_extra_options` помогают стабилизировать SSH-подключение между разными дистрибутивами;
 - `ssh_legacy_algorithms=true` включает совместимость с устаревшими SSH-алгоритмами на старых хостах;
-- если `control_via_ssh=false`, кнопки stop/start/restart для узла не будут работать.
+- если `control_via_ssh=false`, кнопки stop/start/restart для узла не будут работать;
+- `collect_disk_metrics_via_ssh=true` включает сбор метрик диска из ОС через SSH (если `iostat` недоступен, метрики останутся пустыми).
 
 ---
 

@@ -45,6 +45,7 @@ class NodeConfig:
     ssh_extra_options: list[str] | None = None
     ssh_legacy_algorithms: bool = False
     service_name: str = "postgrespro"
+    collect_disk_metrics_via_ssh: bool = True
 
 
 @dataclass
@@ -250,6 +251,9 @@ def fetch_node_metrics(node: NodeConfig, target_db: str) -> dict[str, Any]:
         "blk_read_time_ms": None,
         "blk_write_time_ms": None,
         "disk_io_queue": None,
+        "disk_read_kb_s_os": None,
+        "disk_write_kb_s_os": None,
+        "disk_util_pct_os": None,
         "tx_read_only": None,
         "error": None,
     }
@@ -307,6 +311,9 @@ def fetch_node_metrics(node: NodeConfig, target_db: str) -> dict[str, Any]:
                             "tx_read_only": row[13],
                         }
                     )
+
+        if node.collect_disk_metrics_via_ssh:
+            result.update(fetch_disk_metrics_via_ssh(node))
     except Exception as exc:
         result["error"] = str(exc)
         LOGGER.exception(
@@ -348,6 +355,9 @@ def fetch_all_node_metrics(nodes: list[NodeConfig], target_db: str) -> list[dict
                     "blk_read_time_ms": None,
                     "blk_write_time_ms": None,
                     "disk_io_queue": None,
+                    "disk_read_kb_s_os": None,
+                    "disk_write_kb_s_os": None,
+                    "disk_util_pct_os": None,
                     "tx_read_only": None,
                     "error": str(exc),
                 }
@@ -355,20 +365,8 @@ def fetch_all_node_metrics(nodes: list[NodeConfig], target_db: str) -> list[dict
     return [rows_by_name[node.name] for node in nodes if node.name in rows_by_name]
 
 
-def run_node_action(node: NodeConfig, action: str) -> tuple[bool, str]:
-    if not node.control_via_ssh or not node.ssh_host:
-        return False, "SSH control disabled for this node in config"
-
+def build_ssh_command(node: NodeConfig, remote_cmd: str) -> list[str]:
     user_prefix = f"{node.ssh_user}@" if node.ssh_user else ""
-    if action == "stop":
-        remote_cmd = f"sudo -n systemctl stop {shlex.quote(node.service_name)}"
-    elif action == "start":
-        remote_cmd = f"sudo -n systemctl start {shlex.quote(node.service_name)}"
-    elif action == "restart":
-        remote_cmd = f"sudo -n systemctl restart {shlex.quote(node.service_name)}"
-    else:
-        return False, f"Unknown action: {action}"
-
     cmd = [
         "ssh",
         "-o",
@@ -400,19 +398,71 @@ def run_node_action(node: NodeConfig, action: str) -> tuple[bool, str]:
         for opt in node.ssh_extra_options:
             cmd.extend(["-o", opt])
 
-    cmd.extend(
-        [
-            f"{user_prefix}{node.ssh_host}",
-            remote_cmd,
-        ]
-    )
+    cmd.extend([f"{user_prefix}{node.ssh_host}", remote_cmd])
+    return cmd
+
+
+def fetch_disk_metrics_via_ssh(node: NodeConfig) -> dict[str, float | int | None]:
+    default_metrics = {
+        "disk_io_queue": None,
+        "disk_read_kb_s_os": None,
+        "disk_write_kb_s_os": None,
+        "disk_util_pct_os": None,
+    }
+    if not node.control_via_ssh or not node.ssh_host:
+        return default_metrics
+
+    remote_cmd = 'bash -lc "iostat -dx 1 2 | awk \'NF && $1 !~ /^(Device|Linux|avg-cpu:)/ {last=$0} END {print last}\'"'
+    cmd = build_ssh_command(node, remote_cmd)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+    except Exception:
+        return default_metrics
+
+    if proc.returncode != 0:
+        return default_metrics
+
+    last_line = proc.stdout.strip()
+    if not last_line:
+        return default_metrics
+    parts = last_line.split()
+    if len(parts) < 14:
+        return default_metrics
+
+    try:
+        # iostat -dx: rrqm/s wrqm/s r/s w/s rkB/s wkB/s avgrq-sz avgqu-sz await r_await w_await svctm %util
+        return {
+            "disk_read_kb_s_os": float(parts[5]),
+            "disk_write_kb_s_os": float(parts[6]),
+            "disk_io_queue": int(float(parts[8])),
+            "disk_util_pct_os": float(parts[13]),
+        }
+    except ValueError:
+        return default_metrics
+
+
+def run_node_action(node: NodeConfig, action: str) -> tuple[bool, str]:
+    if not node.control_via_ssh or not node.ssh_host:
+        return False, "SSH control disabled for this node in config"
+
+    if action == "stop":
+        remote_cmd = f"sudo -n systemctl stop {shlex.quote(node.service_name)}"
+    elif action == "start":
+        remote_cmd = f"sudo -n systemctl start {shlex.quote(node.service_name)}"
+    elif action == "restart":
+        remote_cmd = f"sudo -n systemctl restart {shlex.quote(node.service_name)}"
+    else:
+        return False, f"Unknown action: {action}"
+
+    cmd = build_ssh_command(node, remote_cmd)
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
     except subprocess.TimeoutExpired:
-        LOGGER.error("SSH command timeout for node=%s action=%s host=%s", node.name, action, node.ssh_host)
-        return False, "SSH command timed out after 15 seconds"
-    ok = proc.returncode == 0
+        LOGGER.error("SSH action timeout for node=%s action=%s host=%s", node.name, action, node.ssh_host)
+        return False, "SSH command timeout"
+
     output = (proc.stdout + "\n" + proc.stderr).strip()
+    ok = proc.returncode == 0
     if ok:
         LOGGER.info("SSH action succeeded for node=%s action=%s host=%s", node.name, action, node.ssh_host)
     else:
@@ -601,6 +651,9 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
             "blk_read_time_ms": "Задержка чтения диска, мс (Disk read latency, ms)",
             "blk_write_time_ms": "Задержка записи диска, мс (Disk write latency, ms)",
             "disk_io_queue": "Очередь к диску (Disk queue)",
+            "disk_read_kb_s_os": "Чтение диска ОС, КБ/с (OS disk read, KB/s)",
+            "disk_write_kb_s_os": "Запись диска ОС, КБ/с (OS disk write, KB/s)",
+            "disk_util_pct_os": "Утилизация диска ОС, % (OS disk util, %)",
             "tx_read_only": "Режим транзакции (Tx read-only)",
             "error": "Ошибка (Error)",
         }
@@ -645,6 +698,9 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
             **{f"disk_read_latency_{row['node']}": float(row.get("blk_read_time_ms") or 0.0) for row in rows},
             **{f"disk_write_latency_{row['node']}": float(row.get("blk_write_time_ms") or 0.0) for row in rows},
             **{f"disk_queue_{row['node']}": int(row.get("disk_io_queue") or 0) for row in rows},
+            **{f"disk_read_kb_s_{row['node']}": float(row.get("disk_read_kb_s_os") or 0.0) for row in rows},
+            **{f"disk_write_kb_s_{row['node']}": float(row.get("disk_write_kb_s_os") or 0.0) for row in rows},
+            **{f"disk_util_pct_{row['node']}": float(row.get("disk_util_pct_os") or 0.0) for row in rows},
         }
     )
 
@@ -660,6 +716,9 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
                     f"disk_read_latency_{node.name}",
                     f"disk_write_latency_{node.name}",
                     f"disk_queue_{node.name}",
+                    f"disk_read_kb_s_{node.name}",
+                    f"disk_write_kb_s_{node.name}",
+                    f"disk_util_pct_{node.name}",
                 ]
             )
         disk_cols = [col for col in disk_cols if col in hist_df.columns]

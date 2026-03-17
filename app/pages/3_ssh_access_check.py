@@ -30,6 +30,7 @@ class NodeConfig:
     ssh_extra_options: list[str] | None = None
     ssh_legacy_algorithms: bool = False
     service_name: str = "postgrespro"
+    collect_disk_metrics_via_ssh: bool = True
 
 
 @dataclass
