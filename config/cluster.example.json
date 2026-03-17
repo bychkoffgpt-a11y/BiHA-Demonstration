@@ -15,7 +15,8 @@
         "ServerAliveInterval=15",
         "ServerAliveCountMax=3"
       ],
-      "service_name": "postgrespro"
+      "service_name": "postgrespro",
+      "collect_disk_metrics_via_ssh": true
     },
     {
       "name": "pg-slave",
@@ -31,7 +32,8 @@
         "ServerAliveInterval=15",
         "ServerAliveCountMax=3"
       ],
-      "service_name": "postgrespro"
+      "service_name": "postgrespro",
+      "collect_disk_metrics_via_ssh": true
     }
   ]
 }
