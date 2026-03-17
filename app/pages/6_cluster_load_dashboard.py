@@ -425,15 +425,24 @@ def get_async_collector(session_key: str, interval_sec: int, history_limit: int)
 
 
 def theme_chart(chart: alt.Chart) -> alt.Chart:
-    return chart.configure_view(strokeOpacity=0).configure_axis(labelColor="#d8dbe2", titleColor="#f5f7fa", gridColor="#2c2f36").configure_legend(labelColor="#d8dbe2", titleColor="#f5f7fa", orient="bottom").configure_title(color="#f5f7fa", fontSize=18)
+    return (
+        chart.configure_view(strokeOpacity=0)
+        .configure_axis(labelColor="#334155", titleColor="#0f172a", gridColor="#cbd5e1")
+        .configure_legend(labelColor="#334155", titleColor="#0f172a", orient="bottom")
+        .configure_title(color="#0f172a", fontSize=18)
+    )
 
 
 def line_chart(df: pd.DataFrame, color_field: str, y_title: str, title: str, y_scale: alt.Scale | None = None) -> None:
     if df.empty:
         st.info("Недостаточно данных")
         return
+    clean_df = df.dropna(subset=["value"])
+    if clean_df.empty:
+        st.info("Недостаточно валидных данных")
+        return
     chart = (
-        alt.Chart(df.dropna(subset=["value"]))
+        alt.Chart(clean_df)
         .mark_line(strokeWidth=4)
         .encode(
             x=alt.X("timestamp:T", title="Время"),
@@ -494,11 +503,12 @@ else:
     with slots[1]:
         line_chart(series["latency"], "metric", "мс", "Latency p95 (мс)", alt.Scale(zero=True))
     with slots[2]:
-        if series["sessions"].empty:
+        sessions_df = series["sessions"].dropna(subset=["value"])
+        if sessions_df.empty:
             st.info("Недостаточно данных")
         else:
             chart = (
-                alt.Chart(series["sessions"])
+                alt.Chart(sessions_df)
                 .mark_area(opacity=0.85)
                 .encode(
                     x=alt.X("timestamp:T", title="Время"),
