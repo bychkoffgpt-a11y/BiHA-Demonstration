@@ -480,14 +480,21 @@ def run_node_action(node: NodeConfig, action: str) -> tuple[bool, str]:
 def render_sidebar() -> dict[str, Any]:
     st.sidebar.header("Профиль нагрузки (Load profile)")
 
-    if "load_mode" not in st.session_state:
-        st.session_state.load_mode = "single-node"
-    if "load_sessions" not in st.session_state:
-        st.session_state.load_sessions = 10
-    if "load_read_ratio" not in st.session_state:
-        st.session_state.load_read_ratio = 0.7
-    if "load_auto_refresh" not in st.session_state:
-        st.session_state.load_auto_refresh = True
+    defaults = {
+        "load_mode": "single-node",
+        "load_sessions": 10,
+        "load_read_ratio": 0.7,
+        "load_auto_refresh": True,
+    }
+
+    # Widget-bound keys can be cleared by Streamlit when switching between pages.
+    # Keep persistent values in dedicated keys and restore widget defaults from them.
+    for key, default in defaults.items():
+        persistent_key = f"persist_{key}"
+        if persistent_key not in st.session_state:
+            st.session_state[persistent_key] = default
+        if key not in st.session_state:
+            st.session_state[key] = st.session_state[persistent_key]
 
     mode = st.sidebar.selectbox(
         "Режим (Mode)",
@@ -500,6 +507,11 @@ def render_sidebar() -> dict[str, Any]:
     )
     read_ratio = st.sidebar.slider("Доля чтения (Read ratio)", 0.0, 1.0, step=0.05, key="load_read_ratio")
     auto_refresh = st.sidebar.checkbox("Автообновление (Auto-refresh)", key="load_auto_refresh")
+
+    st.session_state.persist_load_mode = mode
+    st.session_state.persist_load_sessions = sessions
+    st.session_state.persist_load_read_ratio = read_ratio
+    st.session_state.persist_load_auto_refresh = auto_refresh
 
     return {"mode": mode, "sessions": sessions, "read_ratio": read_ratio, "auto_refresh": auto_refresh}
 
