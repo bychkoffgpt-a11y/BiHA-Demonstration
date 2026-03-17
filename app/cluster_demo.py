@@ -1053,11 +1053,13 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: Bac
         disk_cols = [col for col in disk_cols if col in hist_df.columns]
 
         chart_df = hist_df.set_index("ts")
+        query_error_cols = ["read_tx", "write_tx", "errors"]
+        query_error_moment_df = chart_df[query_error_cols].diff().clip(lower=0).fillna(0)
         chart_cols = st.columns(3)
 
         with chart_cols[0]:
             st.caption("Запросы и ошибки (Queries and errors)")
-            st.line_chart(chart_df[["read_tx", "write_tx", "errors"]], height=320)
+            st.line_chart(query_error_moment_df, height=320)
 
         with chart_cols[1]:
             st.caption("Блокировки и активные запросы (Locks and active queries)")
