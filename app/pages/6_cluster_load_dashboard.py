@@ -4,9 +4,10 @@ import json
 import shlex
 import subprocess
 import time
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import altair as alt
 import pandas as pd
@@ -256,13 +257,6 @@ def fetch_disk_latency(node: NodeConfig) -> dict[str, float | None]:
     return metrics
 
 
-def append_snapshot(snapshot: dict[str, Any], history_limit: int) -> None:
-    history = st.session_state.get("exec_dashboard_history", [])
-    history.append(snapshot)
-    if len(history) > history_limit:
-        history = history[-history_limit:]
-    st.session_state["exec_dashboard_history"] = history
-
 
 def rate(curr: float | int | None, prev: float | int | None, dt_sec: float) -> float | None:
     if curr is None or prev is None or dt_sec <= 0:
@@ -273,8 +267,7 @@ def rate(curr: float | int | None, prev: float | int | None, dt_sec: float) -> f
     return delta / dt_sec
 
 
-def build_timeseries(interval_minutes: int) -> dict[str, pd.DataFrame]:
-    history: list[dict[str, Any]] = st.session_state.get("exec_dashboard_history", [])
+def build_timeseries(history: list[dict[str, Any]], interval_minutes: int) -> dict[str, pd.DataFrame]:
     if len(history) < 2:
         return {}
 
@@ -373,6 +366,63 @@ def build_timeseries(interval_minutes: int) -> dict[str, pd.DataFrame]:
     return result
 
 
+class AsyncMetricsCollector:
+    """Фоновый сбор метрик без блокировки интерфейса Streamlit."""
+
+    def __init__(self, interval_sec: int, history_limit: int) -> None:
+        self.interval_sec = interval_sec
+        self.history_limit = history_limit
+        self._history: list[dict[str, Any]] = []
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self, collect_fn: Callable[[], dict[str, Any]]) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+
+        self._stop_event.clear()
+
+        def worker() -> None:
+            while not self._stop_event.is_set():
+                snapshot = collect_fn()
+                with self._lock:
+                    self._history.append(snapshot)
+                    if len(self._history) > self.history_limit:
+                        self._history = self._history[-self.history_limit:]
+                self._stop_event.wait(self.interval_sec)
+
+        self._thread = threading.Thread(target=worker, daemon=True, name="metrics-collector")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2)
+        self._thread = None
+
+    def update(self, interval_sec: int, history_limit: int) -> None:
+        self.interval_sec = interval_sec
+        self.history_limit = history_limit
+
+    def collect_once(self, collect_fn: Callable[[], dict[str, Any]]) -> None:
+        snapshot = collect_fn()
+        with self._lock:
+            self._history.append(snapshot)
+            if len(self._history) > self.history_limit:
+                self._history = self._history[-self.history_limit:]
+
+    def history(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return list(self._history)
+
+
+@st.cache_resource
+def get_async_collector(session_key: str, interval_sec: int, history_limit: int) -> AsyncMetricsCollector:
+    collector = AsyncMetricsCollector(interval_sec=interval_sec, history_limit=history_limit)
+    return collector
+
+
 def theme_chart(chart: alt.Chart) -> alt.Chart:
     return chart.configure_view(strokeOpacity=0).configure_axis(labelColor="#d8dbe2", titleColor="#f5f7fa", gridColor="#2c2f36").configure_legend(labelColor="#d8dbe2", titleColor="#f5f7fa", orient="bottom").configure_title(color="#f5f7fa", fontSize=18)
 
@@ -420,10 +470,18 @@ window_minutes = col3.select_slider("Интервал по X (мин)", options=
 compact_grid = st.checkbox("Вертикальная сетка (4 ряда × 2 графика)", value=False)
 
 history_limit = int((window_minutes * 60) / interval_sec) + 30
-if st.button("Снять новый срез", type="primary", width="stretch") or auto_refresh:
-    append_snapshot(fetch_snapshot(primary, standby, target_db), history_limit)
 
-series = build_timeseries(window_minutes)
+session_key = f"{primary.name}|{standby.name if standby else 'none'}|{target_db}"
+collector = get_async_collector(session_key, interval_sec, history_limit)
+collector.update(interval_sec=interval_sec, history_limit=history_limit)
+
+if auto_refresh:
+    collector.start(lambda: fetch_snapshot(primary, standby, target_db))
+
+if st.button("Снять новый срез", type="primary", width="stretch"):
+    collector.collect_once(lambda: fetch_snapshot(primary, standby, target_db))
+
+series = build_timeseries(collector.history(), window_minutes)
 if not series:
     st.info("Соберите минимум два среза метрик для отображения графиков.")
 else:
@@ -462,5 +520,8 @@ else:
         line_chart(series["lag"], "metric", "сек", "Replication lag (с)", alt.Scale(zero=True))
 
 if auto_refresh:
-    time.sleep(interval_sec)
+    st.caption("Сбор метрик выполняется в фоновом потоке. Интерфейс обновляется отдельно.")
+    time.sleep(0.7)
     st.rerun()
+else:
+    collector.stop()
