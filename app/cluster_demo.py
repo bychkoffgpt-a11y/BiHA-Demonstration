@@ -143,6 +143,117 @@ class WorkloadGenerator:
             time.sleep(0.001)
 
 
+class BackgroundMetricsCollector:
+    """Фоновый сборщик метрик кластера."""
+
+    def __init__(self) -> None:
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self._mode: str = "single-node"
+        self._cluster_signature: tuple[Any, ...] | None = None
+        self._latest_rows: list[dict[str, Any]] = []
+        self._latest_target_db: str = "postgres"
+        self._last_update_ts: pd.Timestamp | None = None
+        self._last_error: str | None = None
+        self._history: list[dict[str, Any]] = []
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def cluster_signature(self) -> tuple[Any, ...] | None:
+        with self._lock:
+            return self._cluster_signature
+
+    def start(self, cluster: ClusterConfig, wg: WorkloadGenerator, mode: str) -> None:
+        self.stop()
+        with self._lock:
+            self._mode = mode
+            self._cluster_signature = build_cluster_signature(cluster)
+            self._latest_rows = []
+            self._latest_target_db = get_target_database(cluster, mode)
+            self._last_update_ts = None
+            self._last_error = None
+            self._history = []
+
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run, args=(cluster, wg), daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+        self._thread = None
+
+    def set_mode(self, mode: str) -> None:
+        with self._lock:
+            self._mode = mode
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "rows": list(self._latest_rows),
+                "target_db": self._latest_target_db,
+                "updated_at": self._last_update_ts,
+                "error": self._last_error,
+            }
+
+    def history_snapshot(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return list(self._history)
+
+    def _run(self, cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
+        while not self._stop_event.is_set():
+            try:
+                with self._lock:
+                    mode = self._mode
+
+                target_db = get_target_database(cluster, mode)
+                rows = fetch_all_node_metrics(cluster.nodes, target_db)
+                stats = wg.stats_snapshot()
+
+                history_entry = {
+                    "ts": pd.Timestamp.now(tz=MOSCOW_TZ),
+                    "read_tx": stats["read_tx"],
+                    "write_tx": stats["write_tx"],
+                    "errors": stats["errors"],
+                    "active_locks": int(sum(int(row.get("active_locks") or 0) for row in rows)),
+                    "active_queries": int(sum(int(row.get("active_queries") or 0) for row in rows)),
+                    **{f"blks_read_{row['node']}": int(row.get("blks_read") or 0) for row in rows},
+                    **{f"disk_read_latency_{row['node']}": float(row.get("blk_read_time_ms") or 0.0) for row in rows},
+                    **{f"disk_write_latency_{row['node']}": float(row.get("blk_write_time_ms") or 0.0) for row in rows},
+                    **{f"disk_queue_{row['node']}": int(row.get("disk_io_queue") or 0) for row in rows},
+                    **{f"disk_read_kb_s_{row['node']}": float(row.get("disk_read_kb_s_os") or 0.0) for row in rows},
+                    **{f"disk_write_kb_s_{row['node']}": float(row.get("disk_write_kb_s_os") or 0.0) for row in rows},
+                    **{f"disk_util_pct_{row['node']}": float(row.get("disk_util_pct_os") or 0.0) for row in rows},
+                }
+
+                with self._lock:
+                    self._latest_rows = rows
+                    self._latest_target_db = target_db
+                    self._last_update_ts = history_entry["ts"]
+                    self._last_error = None
+                    self._history.append(history_entry)
+                    if len(self._history) > DEFAULT_HISTORY:
+                        del self._history[:-DEFAULT_HISTORY]
+            except Exception as exc:
+                LOGGER.exception("Ошибка фонового сбора метрик")
+                with self._lock:
+                    self._last_error = str(exc)
+
+            self._stop_event.wait(cluster.poll_interval_sec)
+
+
+def build_cluster_signature(cluster: ClusterConfig) -> tuple[Any, ...]:
+    return (
+        cluster.poll_interval_sec,
+        tuple((node.name, node.dsn, node.role_hint, node.control_via_ssh, node.ssh_host) for node in cluster.nodes),
+    )
+
+
 def select_node_for_workload(nodes: list[NodeConfig], mode: str, write_tx: bool) -> NodeConfig | None:
     master_hints = {"master", "primary", "leader"}
     slave_hints = {"slave", "replica", "standby"}
@@ -631,11 +742,11 @@ def reset_server_stats(cluster: ClusterConfig) -> None:
         st.success("Серверная статистика сброшена (Server statistics reset).")
 
 
-def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
+def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: BackgroundMetricsCollector) -> None:
     st.subheader("Состояние кластера (Cluster state)")
-    mode = st.session_state.get("load_mode", "single-node")
-    target_db = get_target_database(cluster, mode)
-    rows = fetch_all_node_metrics(cluster.nodes, target_db)
+    snap = collector.snapshot()
+    target_db = snap["target_db"]
+    rows = snap["rows"]
     df = pd.DataFrame(rows)
     if not df.empty:
         df.insert(
@@ -671,10 +782,15 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
         }
     )
     st.caption(f"Целевая БД нагрузки (Target DB): {target_db}")
+    if snap["updated_at"] is not None:
+        st.caption(f"Последнее обновление метрик: {snap['updated_at'].strftime('%H:%M:%S')}")
     row_height_px = 35
     header_height_px = 38
     table_height = max(105, min(190, header_height_px + len(localized_df) * row_height_px))
     st.dataframe(localized_df, width="stretch", height=table_height, hide_index=True)
+    if snap["error"]:
+        st.warning(f"Ошибка фонового сборщика метрик: {snap['error']}")
+
     if rows and all(row.get("status") != "up" for row in rows):
         LOGGER.warning(
             "No DB connections to any node. Errors: %s",
@@ -694,31 +810,7 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
     if recent_errors:
         st.caption("Подробные логи SQL-транзакций перенесены на страницу «SQL логи транзакций».")
 
-    if "history" not in st.session_state:
-        st.session_state.history = []
-
-    history = st.session_state.history
-    history.append(
-        {
-            "ts": pd.Timestamp.now(tz=MOSCOW_TZ),
-            "read_tx": stats["read_tx"],
-            "write_tx": stats["write_tx"],
-            "errors": stats["errors"],
-            "active_locks": int(pd.to_numeric(df["active_locks"], errors="coerce").fillna(0).sum()) if not df.empty else 0,
-            "active_queries": int(pd.to_numeric(df["active_queries"], errors="coerce").fillna(0).sum()) if not df.empty else 0,
-            **{f"blks_read_{row['node']}": int(row.get("blks_read") or 0) for row in rows},
-            **{f"disk_read_latency_{row['node']}": float(row.get("blk_read_time_ms") or 0.0) for row in rows},
-            **{f"disk_write_latency_{row['node']}": float(row.get("blk_write_time_ms") or 0.0) for row in rows},
-            **{f"disk_queue_{row['node']}": int(row.get("disk_io_queue") or 0) for row in rows},
-            **{f"disk_read_kb_s_{row['node']}": float(row.get("disk_read_kb_s_os") or 0.0) for row in rows},
-            **{f"disk_write_kb_s_{row['node']}": float(row.get("disk_write_kb_s_os") or 0.0) for row in rows},
-            **{f"disk_util_pct_{row['node']}": float(row.get("disk_util_pct_os") or 0.0) for row in rows},
-        }
-    )
-
-    if len(history) > DEFAULT_HISTORY:
-        del history[:-DEFAULT_HISTORY]
-
+    history = collector.history_snapshot()
     hist_df = pd.DataFrame(history)
     if not hist_df.empty:
         disk_cols: list[str] = []
@@ -776,11 +868,21 @@ def main() -> None:
 
     if "workload_generator" not in st.session_state:
         st.session_state.workload_generator = WorkloadGenerator()
+    if "metrics_collector" not in st.session_state:
+        st.session_state.metrics_collector = BackgroundMetricsCollector()
 
     wg: WorkloadGenerator = st.session_state.workload_generator
+    collector: BackgroundMetricsCollector = st.session_state.metrics_collector
     profile = render_sidebar()
+
+    current_signature = build_cluster_signature(cluster)
+    if collector.cluster_signature != current_signature or not collector.running:
+        collector.start(cluster, wg, profile["mode"])
+    else:
+        collector.set_mode(profile["mode"])
+
     render_controls(cluster, wg, profile)
-    render_metrics(cluster, wg)
+    render_metrics(cluster, wg, collector)
 
     if profile["auto_refresh"]:
         time.sleep(cluster.poll_interval_sec)
