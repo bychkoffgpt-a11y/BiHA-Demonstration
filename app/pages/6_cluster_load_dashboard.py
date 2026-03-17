@@ -380,7 +380,6 @@ def build_timeseries(history: list[dict[str, Any]], interval_minutes: int) -> di
     cpu_rows: list[dict[str, Any]] = []
     disk_rows: list[dict[str, Any]] = []
     wal_rows: list[dict[str, Any]] = []
-    lag_rows: list[dict[str, Any]] = []
 
     for idx, (prev, curr) in enumerate(zip(points, points[1:])):
         ts = curr["timestamp"]
@@ -425,7 +424,6 @@ def build_timeseries(history: list[dict[str, Any]], interval_minutes: int) -> di
 
         wal_rate = rate(curr["wal_bytes"], prev["wal_bytes"], dt_sec)
         wal_rows.append({"timestamp": ts, "metric": "WAL MB/s", "value": wal_rate / 1024 / 1024 if wal_rate is not None else None})
-        lag_rows.append({"timestamp": ts, "metric": "Replay lag", "value": curr["replay_lag_sec"]})
 
     result = {
         "tps": pd.DataFrame(tps_rows),
@@ -434,7 +432,6 @@ def build_timeseries(history: list[dict[str, Any]], interval_minutes: int) -> di
         "cpu": pd.DataFrame(cpu_rows),
         "disk": pd.DataFrame(disk_rows),
         "wal": pd.DataFrame(wal_rows),
-        "lag": pd.DataFrame(lag_rows),
     }
 
     return result
@@ -531,15 +528,6 @@ def build_cpu_df(history: list[dict[str, Any]], interval_minutes: int) -> pd.Dat
     return pd.DataFrame(rows)
 
 
-def build_lag_df(history: list[dict[str, Any]], interval_minutes: int) -> pd.DataFrame:
-    cutoff = pd.Timestamp.now(tz="Europe/Moscow") - pd.Timedelta(minutes=interval_minutes)
-    rows = [
-        {"timestamp": item["timestamp"], "metric": "Replay lag", "value": item.get("replay_lag_sec")}
-        for item in history
-        if item["timestamp"] >= cutoff
-    ]
-    return pd.DataFrame(rows)
-
 
 def theme_chart(chart: alt.Chart) -> alt.Chart:
     return (
@@ -609,26 +597,19 @@ cpu_interval_sec = min(interval_sec + 2, 30)
 cpu_collector = get_async_collector(f"cpu|{session_key}", cpu_interval_sec, history_limit)
 cpu_collector.update(interval_sec=cpu_interval_sec, history_limit=history_limit)
 
-lag_interval_sec = min(interval_sec + 1, 30)
-lag_collector = get_async_collector(f"lag|{session_key}", lag_interval_sec, history_limit)
-lag_collector.update(interval_sec=lag_interval_sec, history_limit=history_limit)
-
 if auto_refresh:
     collector.start(lambda: fetch_snapshot(primary, standby, target_db))
     sessions_collector.start(lambda: fetch_sessions_snapshot(primary), start_delay_sec=0.3)
     cpu_collector.start(lambda: fetch_cpu_snapshot(primary, standby), start_delay_sec=0.9)
-    lag_collector.start(lambda: fetch_replication_lag_snapshot(primary), start_delay_sec=0.6)
 
 if st.button("Снять новый срез", type="primary", width="stretch"):
     collector.collect_once(lambda: fetch_snapshot(primary, standby, target_db))
     sessions_collector.collect_once(lambda: fetch_sessions_snapshot(primary))
     cpu_collector.collect_once(lambda: fetch_cpu_snapshot(primary, standby))
-    lag_collector.collect_once(lambda: fetch_replication_lag_snapshot(primary))
 
 series = build_timeseries(collector.history(), window_minutes)
 sessions_df = build_sessions_df(sessions_collector.history(), window_minutes)
 cpu_df = build_cpu_df(cpu_collector.history(), window_minutes)
-lag_df = build_lag_df(lag_collector.history(), window_minutes)
 if not series:
     st.info("Соберите минимум два среза метрик для отображения графиков.")
 else:
@@ -662,8 +643,6 @@ else:
         line_chart(series["disk"], "metric", "мс", "Disk latency (Primary, мс)", alt.Scale(zero=True))
     with slots[5]:
         line_chart(series["wal"], "metric", "МБ/с", "WAL generation rate (MB/s)", alt.Scale(zero=True))
-    with slots[6]:
-        line_chart(lag_df, "metric", "сек", "Replication lag (с)", alt.Scale(zero=True))
 
 if auto_refresh:
     st.caption("Сбор метрик выполняется в фоновом потоке. Интерфейс обновляется отдельно.")
@@ -678,4 +657,3 @@ else:
     collector.stop()
     sessions_collector.stop()
     cpu_collector.stop()
-    lag_collector.stop()
