@@ -1040,10 +1040,6 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: Bac
     )
 
     st.subheader("Статистика нагрузки (Load stats)")
-    stat_cols = st.columns(3)
-    stat_cols[0].metric("Транзакции чтения", f"{stats['read_tx']:,}".replace(",", " "))
-    stat_cols[1].metric("Транзакции записи", f"{stats['write_tx']:,}".replace(",", " "))
-    stat_cols[2].metric("Ошибки", f"{stats['errors']:,}".replace(",", " "))
 
     recent_errors = wg.recent_errors_snapshot()
     if recent_errors:
@@ -1074,15 +1070,22 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: Bac
         with chart_cols[0]:
             st.caption("Запросы и ошибки (Queries and errors)")
             st.line_chart(query_error_moment_df, height=320)
+            st.caption("Источник данных: генератор нагрузки (счётчики read_tx, write_tx, errors; на графике показана разница между соседними срезами).")
 
         with chart_cols[1]:
             st.caption("Блокировки и активные запросы (Locks and active queries)")
             st.line_chart(chart_df[["active_locks", "active_queries"]], height=320)
+            st.caption("Источник данных: PostgreSQL system views pg_locks и pg_stat_activity.")
 
         with chart_cols[2]:
             st.caption("Нагрузка на диски по узлам (Disk load per node)")
             if disk_cols:
                 st.line_chart(chart_df[disk_cols], height=320)
+                st.caption(
+                    "Источник данных: SSH iostat -dx и PostgreSQL. "
+                    "Ось Y: значения в исходной размерности метрик "
+                    "(latency — ms, read/write — KB/s, util — %, queue — средняя длина очереди)."
+                )
             else:
                 st.info("Пока нет данных по дискам")
 
