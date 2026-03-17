@@ -429,15 +429,28 @@ def run_node_action(node: NodeConfig, action: str) -> tuple[bool, str]:
 
 def render_sidebar() -> dict[str, Any]:
     st.sidebar.header("Профиль нагрузки (Load profile)")
+
+    if "load_mode" not in st.session_state:
+        st.session_state.load_mode = "single-node"
+    if "load_sessions" not in st.session_state:
+        st.session_state.load_sessions = 10
+    if "load_read_ratio" not in st.session_state:
+        st.session_state.load_read_ratio = 0.7
+    if "load_auto_refresh" not in st.session_state:
+        st.session_state.load_auto_refresh = True
+
     mode = st.sidebar.selectbox(
         "Режим (Mode)",
         options=["single-node", "dual-read", "master-rw-slave-r"],
         help="single-node: вся нагрузка на master; dual-read: чтение с обеих; master-rw-slave-r: запись на master, чтение с slave",
+        key="load_mode",
     )
-    sessions = st.sidebar.slider("Клиентские сессии (Client sessions)", min_value=1, max_value=200, value=10, step=1)
-    read_ratio = st.sidebar.slider("Доля чтения (Read ratio)", 0.0, 1.0, 0.7, 0.05)
-    auto_refresh = st.sidebar.checkbox("Автообновление (Auto-refresh)", value=True)
-    st.session_state.load_mode = mode
+    sessions = st.sidebar.slider(
+        "Клиентские сессии (Client sessions)", min_value=1, max_value=200, step=1, key="load_sessions"
+    )
+    read_ratio = st.sidebar.slider("Доля чтения (Read ratio)", 0.0, 1.0, step=0.05, key="load_read_ratio")
+    auto_refresh = st.sidebar.checkbox("Автообновление (Auto-refresh)", key="load_auto_refresh")
+
     return {"mode": mode, "sessions": sessions, "read_ratio": read_ratio, "auto_refresh": auto_refresh}
 
 
