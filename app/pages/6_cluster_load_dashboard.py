@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import shlex
 import subprocess
-import time
 import threading
 from dataclasses import dataclass, fields
 from pathlib import Path
@@ -110,8 +109,6 @@ def fetch_snapshot(primary: NodeConfig, standby: NodeConfig | None, target_db: s
         "waiting": 0,
         "wal_bytes": None,
         "replay_lag_sec": None,
-        "top_sql": [],
-        "top_sql_mode": "counter",
         "cpu_primary": None,
         "cpu_standby": None,
         "disk_read_ms": None,
@@ -165,71 +162,6 @@ def fetch_snapshot(primary: NodeConfig, standby: NodeConfig | None, target_db: s
                 )
                 row = cur.fetchone()
                 snapshot["replay_lag_sec"] = float(row[0] or 0)
-
-                try:
-                    cur.execute(
-                        """
-                        SELECT
-                            queryid::text,
-                            LEFT(REGEXP_REPLACE(query, '\\s+', ' ', 'g'), 60) AS query_short,
-                            total_exec_time,
-                            calls
-                        FROM pg_stat_statements
-                        WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
-                        ORDER BY total_exec_time DESC
-                        LIMIT 10
-                        """
-                    )
-                    top_sql_rows = cur.fetchall()
-                    sql_entries: list[dict[str, Any]] = []
-                    lat_candidates: list[tuple[float, int]] = []
-                    for queryid, query_short, total_exec, calls in top_sql_rows:
-                        calls_i = int(calls or 0)
-                        total_exec_f = float(total_exec or 0)
-                        sql_entries.append({
-                            "queryid": str(queryid),
-                            "query": query_short or "<empty>",
-                            "total_exec_time": total_exec_f,
-                            "calls": calls_i,
-                        })
-                        if calls_i > 0:
-                            lat_candidates.append((total_exec_f / calls_i, calls_i))
-                    snapshot["top_sql"] = sql_entries
-                    if lat_candidates:
-                        series = []
-                        for latency, weight in lat_candidates:
-                            series.extend([latency] * min(weight, 50))
-                        if series:
-                            snapshot["latency_p95_ms"] = float(pd.Series(series).quantile(0.95))
-                except psycopg.errors.UndefinedTable:
-                    LOGGER.warning("pg_stat_statements недоступен на узле %s, используем fallback", primary.name)
-                    snapshot["top_sql_mode"] = "instant"
-                    cur.execute(
-                        """
-                        SELECT
-                            LEFT(REGEXP_REPLACE(query, '\\s+', ' ', 'g'), 60) AS query_short,
-                            COUNT(*) AS active_calls,
-                            AVG(EXTRACT(EPOCH FROM (clock_timestamp() - query_start)) * 1000.0) AS avg_runtime_ms
-                        FROM pg_stat_activity
-                        WHERE backend_type = 'client backend'
-                          AND state = 'active'
-                          AND query_start IS NOT NULL
-                          AND query NOT ILIKE 'autovacuum:%'
-                        GROUP BY query_short
-                        ORDER BY avg_runtime_ms DESC
-                        LIMIT 10
-                        """
-                    )
-                    fallback_rows = cur.fetchall()
-                    snapshot["top_sql"] = [
-                        {
-                            "queryid": f"fallback:{idx}",
-                            "query": str(query_short or "<empty>"),
-                            "total_exec_time": float(avg_runtime_ms or 0),
-                            "calls": int(active_calls or 0),
-                        }
-                        for idx, (query_short, active_calls, avg_runtime_ms) in enumerate(fallback_rows)
-                    ]
 
                 if snapshot["latency_p95_ms"] is None:
                     cur.execute(
@@ -347,7 +279,6 @@ def build_timeseries(history: list[dict[str, Any]], interval_minutes: int) -> di
     tps_rows: list[dict[str, Any]] = []
     latency_rows: list[dict[str, Any]] = []
     sessions_rows: list[dict[str, Any]] = []
-    sql_rows: list[dict[str, Any]] = []
     cpu_rows: list[dict[str, Any]] = []
     disk_rows: list[dict[str, Any]] = []
     wal_rows: list[dict[str, Any]] = []
@@ -380,27 +311,6 @@ def build_timeseries(history: list[dict[str, Any]], interval_minutes: int) -> di
             ]
         )
 
-        prev_sql = {item["queryid"]: item for item in prev.get("top_sql", [])}
-        sql_mode = curr.get("top_sql_mode", "counter")
-        for item in curr.get("top_sql", []):
-            prev_item = prev_sql.get(item["queryid"])
-            if sql_mode == "counter":
-                if not prev_item:
-                    continue
-                delta_time = item["total_exec_time"] - prev_item["total_exec_time"]
-                if delta_time < 0:
-                    continue
-                value = delta_time / dt_sec
-            else:
-                value = float(item["total_exec_time"] or 0)
-            sql_rows.append(
-                {
-                    "timestamp": ts,
-                    "query": item["query"],
-                    "value": value,
-                }
-            )
-
         cpu_rows.extend(
             [
                 {"timestamp": ts, "node": "Primary CPU", "value": curr["cpu_primary"]},
@@ -416,27 +326,18 @@ def build_timeseries(history: list[dict[str, Any]], interval_minutes: int) -> di
         )
 
         wal_rate = rate(curr["wal_bytes"], prev["wal_bytes"], dt_sec)
-        if idx % 2 == 0:
-            wal_rows.append({"timestamp": ts, "metric": "WAL MB/s", "value": wal_rate / 1024 / 1024 if wal_rate is not None else None})
-
-        if idx % 2 == 1:
-            lag_rows.append({"timestamp": ts, "metric": "Replay lag", "value": curr["replay_lag_sec"]})
+        wal_rows.append({"timestamp": ts, "metric": "WAL MB/s", "value": wal_rate / 1024 / 1024 if wal_rate is not None else None})
+        lag_rows.append({"timestamp": ts, "metric": "Replay lag", "value": curr["replay_lag_sec"]})
 
     result = {
         "tps": pd.DataFrame(tps_rows),
         "latency": pd.DataFrame(latency_rows),
         "sessions": pd.DataFrame(sessions_rows),
-        "top_sql": pd.DataFrame(sql_rows),
         "cpu": pd.DataFrame(cpu_rows),
         "disk": pd.DataFrame(disk_rows),
         "wal": pd.DataFrame(wal_rows),
         "lag": pd.DataFrame(lag_rows),
     }
-
-    if not result["top_sql"].empty:
-        recent = result["top_sql"].sort_values("timestamp").groupby("query", as_index=False).tail(1)
-        top_queries = set(recent.sort_values("value", ascending=False).head(5)["query"].tolist())
-        result["top_sql"] = result["top_sql"][result["top_sql"]["query"].isin(top_queries)]
 
     return result
 
@@ -594,19 +495,16 @@ else:
             )
             st.altair_chart(theme_chart(chart), width="stretch")
     with slots[3]:
-        line_chart(series["top_sql"], "query", "мс/с", "Top SQL by total time (мс/с)", alt.Scale(zero=True))
-    with slots[4]:
         line_chart(series["cpu"], "node", "%", "CPU primary / standby (%)", alt.Scale(domain=[0, 100]))
-    with slots[5]:
+    with slots[4]:
         line_chart(series["disk"], "metric", "мс", "Disk latency (Primary, мс)", alt.Scale(zero=True))
-    with slots[6]:
+    with slots[5]:
         line_chart(series["wal"], "metric", "МБ/с", "WAL generation rate (MB/s)", alt.Scale(zero=True))
-    with slots[7]:
+    with slots[6]:
         line_chart(series["lag"], "metric", "сек", "Replication lag (с)", alt.Scale(zero=True))
 
 if auto_refresh:
     st.caption("Сбор метрик выполняется в фоновом потоке. Интерфейс обновляется отдельно.")
-    time.sleep(0.7)
-    st.rerun()
+    st.autorefresh(interval=1000, key=f"cluster-load-refresh-{session_key}")
 else:
     collector.stop()
