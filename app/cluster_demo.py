@@ -32,6 +32,7 @@ MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 LOGGER = setup_file_logger()
 WORKLOAD_LOCK_TIMEOUT_MS = 1_500
 WORKLOAD_STATEMENT_TIMEOUT_MS = 8_000
+PG_QUERY_CANCELED_SQLSTATE = "57014"
 
 
 @dataclass
@@ -165,6 +166,7 @@ class WorkloadGenerator:
         while not self._stop_event.is_set() and not worker_stop_event.is_set():
             node: NodeConfig | None = None
             write_tx = False
+            mode = "single-node"
             try:
                 with self._settings_lock:
                     cluster = self._cluster
@@ -178,7 +180,28 @@ class WorkloadGenerator:
                 node = select_node_for_workload(cluster.nodes, mode, write_tx)
                 if not node:
                     raise RuntimeError("No available node for selected mode")
-                execute_workload_tx(node, write_tx, sizing)
+                try:
+                    execute_workload_tx(node, write_tx, sizing)
+                except Exception as exc:
+                    fallback_node = pick_master_node(cluster.nodes)
+                    should_retry_on_master = (
+                        not write_tx
+                        and fallback_node is not None
+                        and fallback_node.name != node.name
+                        and is_recovery_conflict_error(exc)
+                    )
+                    if not should_retry_on_master:
+                        raise
+
+                    LOGGER.info(
+                        "Retrying read transaction on master after replica recovery conflict | "
+                        "mode=%s failed_node=%s fallback_node=%s",
+                        mode,
+                        node.name,
+                        fallback_node.name,
+                    )
+                    node = fallback_node
+                    execute_workload_tx(node, write_tx, sizing)
                 with self._lock:
                     self._stats["write_tx" if write_tx else "read_tx"] += 1
             except Exception as exc:
@@ -348,6 +371,14 @@ def select_node_for_workload(nodes: list[NodeConfig], mode: str, write_tx: bool)
     return fallback_node
 
 
+def pick_master_node(nodes: list[NodeConfig]) -> NodeConfig | None:
+    master_hints = {"master", "primary", "leader"}
+    masters = [n for n in nodes if n.role_hint.strip().lower() in master_hints]
+    if masters:
+        return masters[0]
+    return nodes[0] if nodes else None
+
+
 def execute_workload_tx(node: NodeConfig, write_tx: bool, sizing: PgLikeSizing) -> None:
     with psycopg.connect(node.dsn, connect_timeout=2, autocommit=False) as conn:
         with conn.cursor() as cur:
@@ -371,6 +402,18 @@ def format_workload_error(exc: Exception) -> str:
     if hint:
         parts.append(f"hint={hint}")
     return " | ".join(parts)
+
+
+def is_recovery_conflict_error(exc: Exception) -> bool:
+    sqlstate = getattr(exc, "sqlstate", None)
+    if sqlstate != PG_QUERY_CANCELED_SQLSTATE:
+        return False
+
+    error_text = str(exc).lower()
+    detail = str(getattr(getattr(exc, "diag", None), "message_detail", "") or "").lower()
+    combined = f"{error_text} {detail}"
+    keywords = ("conflict with recovery", "конфликт", "восстановлен")
+    return any(keyword in combined for keyword in keywords)
 
 
 def extract_dbname_from_dsn(dsn: str) -> str:
