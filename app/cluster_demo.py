@@ -882,25 +882,24 @@ def render_controls(
     collector: BackgroundMetricsCollector,
 ) -> None:
     st.subheader("Управление сценарием (Scenario controls)")
-    scenario_cols = st.columns([1.2, 3.8])
-
-    if scenario_cols[0].button("🔄 Reset counters", use_container_width=True, key="scenario_reset_counters"):
+    if st.button("🔄 Reset counters", use_container_width=True, key="scenario_reset_counters"):
         st.session_state["confirm_reset_counters"] = True
 
     if st.session_state.get("confirm_reset_counters", False):
-        st.warning(
-            "Подтвердите сброс серверной статистики на всех узлах кластера. "
-            "Будут предприняты попытки очистки счётчиков pg_stat_database и связанных shared статистик."
-        )
-        confirm_cols = st.columns([1, 1, 3])
-        if confirm_cols[0].button("✅ Да, сбросить", key="confirm_reset_yes", use_container_width=True):
-            wg.reset_stats()
-            reset_server_stats(cluster)
-            st.session_state["confirm_reset_counters"] = False
-            st.rerun()
-        if confirm_cols[1].button("❌ Отмена", key="confirm_reset_no", use_container_width=True):
-            st.session_state["confirm_reset_counters"] = False
-            st.rerun()
+        with st.container(border=True):
+            st.warning(
+                "Подтвердите сброс серверной статистики на всех узлах кластера. "
+                "Будут предприняты попытки очистки счётчиков pg_stat_database и связанных shared статистик."
+            )
+            confirm_cols = st.columns(2)
+            if confirm_cols[0].button("✅ Да, сбросить", key="confirm_reset_yes", use_container_width=True):
+                wg.reset_stats()
+                reset_server_stats(cluster)
+                st.session_state["confirm_reset_counters"] = False
+                st.rerun()
+            if confirm_cols[1].button("❌ Отмена", key="confirm_reset_no", use_container_width=True):
+                st.session_state["confirm_reset_counters"] = False
+                st.rerun()
 
     st.markdown("#### Управление хостами (Host controls)")
 
