@@ -617,13 +617,28 @@ else:
             )
             st.altair_chart(theme_chart(chart), width="stretch")
 
+    def render_tps_chart() -> None:
+        line_chart(series["tps"], "metric", "транзакции/с", "TPS (транзакции/с)", alt.Scale(zero=True))
+
+    def render_latency_chart() -> None:
+        line_chart(series["latency"], "metric", "мс", "Latency p95 (мс)", alt.Scale(zero=True))
+
+    def render_cpu_chart() -> None:
+        line_chart(series["cpu"], "node", "%", "CPU primary / standby (%)", alt.Scale(domain=[0, 100]))
+
+    def render_disk_chart() -> None:
+        line_chart(series["disk"], "metric", "мс", "Disk latency (Primary, мс)", alt.Scale(zero=True))
+
+    def render_wal_chart() -> None:
+        line_chart(series["wal"], "metric", "МБ/с", "WAL generation rate (MB/s)", alt.Scale(zero=True))
+
     charts: list[Callable[[], None]] = [
-        lambda: line_chart(series["tps"], "metric", "транзакции/с", "TPS (транзакции/с)", alt.Scale(zero=True)),
-        lambda: line_chart(series["latency"], "metric", "мс", "Latency p95 (мс)", alt.Scale(zero=True)),
+        render_tps_chart,
+        render_latency_chart,
         render_sessions_chart,
-        lambda: line_chart(series["cpu"], "node", "%", "CPU primary / standby (%)", alt.Scale(domain=[0, 100])),
-        lambda: line_chart(series["disk"], "metric", "мс", "Disk latency (Primary, мс)", alt.Scale(zero=True)),
-        lambda: line_chart(series["wal"], "metric", "МБ/с", "WAL generation rate (MB/s)", alt.Scale(zero=True)),
+        render_cpu_chart,
+        render_disk_chart,
+        render_wal_chart,
     ]
 
     if compact_grid:
