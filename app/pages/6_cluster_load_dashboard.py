@@ -13,6 +13,11 @@ import pandas as pd
 import psycopg
 import streamlit as st
 
+try:
+    from streamlit_autorefresh import st_autorefresh
+except ImportError:
+    st_autorefresh = None
+
 from logging_utils import setup_file_logger
 
 LOGGER = setup_file_logger()
@@ -505,6 +510,9 @@ else:
 
 if auto_refresh:
     st.caption("Сбор метрик выполняется в фоновом потоке. Интерфейс обновляется отдельно.")
-    st.autorefresh(interval=1000, key=f"cluster-load-refresh-{session_key}")
+    if st_autorefresh is None:
+        st.warning("streamlit-autorefresh не установлен: автообновление интерфейса отключено.")
+    else:
+        st_autorefresh(interval=1000, key=f"cluster-load-refresh-{session_key}")
 else:
     collector.stop()
