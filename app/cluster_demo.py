@@ -742,6 +742,15 @@ def render_sidebar() -> dict[str, Any]:
         if key not in st.session_state:
             st.session_state[key] = st.session_state[persistent_key]
 
+    # Sync exact number inputs to slider-backed values before widgets are instantiated.
+    # Streamlit does not allow changing widget state after the widget with the same key is created.
+    for key in ("load_clients", "load_threads_per_client"):
+        input_key = f"{key}_input"
+        if input_key not in st.session_state:
+            st.session_state[input_key] = int(st.session_state[key])
+        elif int(st.session_state[input_key]) != int(st.session_state[key]):
+            st.session_state[key] = int(st.session_state[input_key])
+
     mode = st.sidebar.selectbox(
         "Режим (Mode)",
         options=["single-node", "dual-read", "master-rw-slave-r"],
@@ -750,7 +759,6 @@ def render_sidebar() -> dict[str, Any]:
     )
     clients = st.sidebar.slider("Количество клиентов", min_value=1, max_value=64, step=1, key="load_clients")
     clients = st.sidebar.number_input("Клиенты (точное значение)", min_value=1, max_value=64, step=1, key="load_clients_input", value=int(clients))
-    st.session_state.load_clients = int(clients)
 
     threads_per_client = st.sidebar.slider(
         "Потоков на клиента", min_value=1, max_value=8, step=1, key="load_threads_per_client"
@@ -763,7 +771,6 @@ def render_sidebar() -> dict[str, Any]:
         key="load_threads_per_client_input",
         value=int(threads_per_client),
     )
-    st.session_state.load_threads_per_client = int(threads_per_client)
 
     total_workers = min(MAX_WORKERS, int(clients) * int(threads_per_client))
     st.sidebar.caption(f"Итого рабочих потоков генератора: {total_workers} (лимит: {MAX_WORKERS})")
