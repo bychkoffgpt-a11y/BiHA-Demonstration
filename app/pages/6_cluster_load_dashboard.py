@@ -200,6 +200,66 @@ def fetch_snapshot(primary: NodeConfig, standby: NodeConfig | None, target_db: s
     return snapshot
 
 
+def fetch_sessions_snapshot(primary: NodeConfig) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
+        "timestamp": pd.Timestamp.now(tz="Europe/Moscow"),
+        "active": 0,
+        "idle": 0,
+        "idle_xact": 0,
+        "waiting": 0,
+    }
+    try:
+        with psycopg.connect(primary.dsn, connect_timeout=3, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) FILTER (WHERE state = 'active') AS active,
+                        COUNT(*) FILTER (WHERE state = 'idle') AS idle,
+                        COUNT(*) FILTER (WHERE state = 'idle in transaction') AS idle_xact,
+                        COUNT(*) FILTER (WHERE state = 'active' AND wait_event_type IS NOT NULL) AS waiting
+                    FROM pg_stat_activity
+                    WHERE backend_type = 'client backend'
+                    """
+                )
+                row = cur.fetchone()
+                if row:
+                    snapshot["active"] = int(row[0] or 0)
+                    snapshot["idle"] = int(row[1] or 0)
+                    snapshot["idle_xact"] = int(row[2] or 0)
+                    snapshot["waiting"] = int(row[3] or 0)
+    except Exception:
+        LOGGER.exception("Не удалось собрать метрики сессий PostgreSQL для узла=%s", primary.name)
+    return snapshot
+
+
+def fetch_replication_lag_snapshot(primary: NodeConfig) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {"timestamp": pd.Timestamp.now(tz="Europe/Moscow"), "replay_lag_sec": None}
+    try:
+        with psycopg.connect(primary.dsn, connect_timeout=3, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COALESCE(MAX(EXTRACT(EPOCH FROM replay_lag)), 0)
+                    FROM pg_stat_replication
+                    """
+                )
+                row = cur.fetchone()
+                snapshot["replay_lag_sec"] = float(row[0] or 0) if row else 0.0
+    except Exception:
+        LOGGER.exception("Не удалось собрать lag репликации PostgreSQL для узла=%s", primary.name)
+    return snapshot
+
+
+def fetch_cpu_snapshot(primary: NodeConfig, standby: NodeConfig | None) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
+        "timestamp": pd.Timestamp.now(tz="Europe/Moscow"),
+        "cpu_primary": fetch_cpu_pct(primary),
+        "cpu_standby": fetch_cpu_pct(standby) if standby else None,
+    }
+    return snapshot
+
+
 def fetch_cpu_pct(node: NodeConfig) -> float | None:
     output = run_ssh_metric(node, 'bash -lc "grep -m1 \'^cpu \' /proc/stat; sleep 1; grep -m1 \'^cpu \' /proc/stat"')
     if output is None:
@@ -391,13 +451,15 @@ class AsyncMetricsCollector:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
-    def start(self, collect_fn: Callable[[], dict[str, Any]]) -> None:
+    def start(self, collect_fn: Callable[[], dict[str, Any]], start_delay_sec: float = 0.0) -> None:
         if self._thread and self._thread.is_alive():
             return
 
         self._stop_event.clear()
 
         def worker() -> None:
+            if start_delay_sec > 0:
+                self._stop_event.wait(start_delay_sec)
             while not self._stop_event.is_set():
                 snapshot = collect_fn()
                 with self._lock:
@@ -435,6 +497,48 @@ class AsyncMetricsCollector:
 def get_async_collector(session_key: str, interval_sec: int, history_limit: int) -> AsyncMetricsCollector:
     collector = AsyncMetricsCollector(interval_sec=interval_sec, history_limit=history_limit)
     return collector
+
+
+def build_sessions_df(history: list[dict[str, Any]], interval_minutes: int) -> pd.DataFrame:
+    cutoff = pd.Timestamp.now(tz="Europe/Moscow") - pd.Timedelta(minutes=interval_minutes)
+    rows: list[dict[str, Any]] = []
+    for item in history:
+        if item["timestamp"] < cutoff:
+            continue
+        rows.extend(
+            [
+                {"timestamp": item["timestamp"], "state": "active", "value": item.get("active")},
+                {"timestamp": item["timestamp"], "state": "waiting", "value": item.get("waiting")},
+                {"timestamp": item["timestamp"], "state": "idle in xact", "value": item.get("idle_xact")},
+                {"timestamp": item["timestamp"], "state": "idle", "value": item.get("idle")},
+            ]
+        )
+    return pd.DataFrame(rows)
+
+
+def build_cpu_df(history: list[dict[str, Any]], interval_minutes: int) -> pd.DataFrame:
+    cutoff = pd.Timestamp.now(tz="Europe/Moscow") - pd.Timedelta(minutes=interval_minutes)
+    rows: list[dict[str, Any]] = []
+    for item in history:
+        if item["timestamp"] < cutoff:
+            continue
+        rows.extend(
+            [
+                {"timestamp": item["timestamp"], "node": "Primary CPU", "value": item.get("cpu_primary")},
+                {"timestamp": item["timestamp"], "node": "Standby CPU", "value": item.get("cpu_standby")},
+            ]
+        )
+    return pd.DataFrame(rows)
+
+
+def build_lag_df(history: list[dict[str, Any]], interval_minutes: int) -> pd.DataFrame:
+    cutoff = pd.Timestamp.now(tz="Europe/Moscow") - pd.Timedelta(minutes=interval_minutes)
+    rows = [
+        {"timestamp": item["timestamp"], "metric": "Replay lag", "value": item.get("replay_lag_sec")}
+        for item in history
+        if item["timestamp"] >= cutoff
+    ]
+    return pd.DataFrame(rows)
 
 
 def theme_chart(chart: alt.Chart) -> alt.Chart:
@@ -498,13 +602,33 @@ session_key = f"{primary.name}|{standby.name if standby else 'none'}|{target_db}
 collector = get_async_collector(session_key, interval_sec, history_limit)
 collector.update(interval_sec=interval_sec, history_limit=history_limit)
 
+sessions_collector = get_async_collector(f"sessions|{session_key}", interval_sec, history_limit)
+sessions_collector.update(interval_sec=interval_sec, history_limit=history_limit)
+
+cpu_interval_sec = min(interval_sec + 2, 30)
+cpu_collector = get_async_collector(f"cpu|{session_key}", cpu_interval_sec, history_limit)
+cpu_collector.update(interval_sec=cpu_interval_sec, history_limit=history_limit)
+
+lag_interval_sec = min(interval_sec + 1, 30)
+lag_collector = get_async_collector(f"lag|{session_key}", lag_interval_sec, history_limit)
+lag_collector.update(interval_sec=lag_interval_sec, history_limit=history_limit)
+
 if auto_refresh:
     collector.start(lambda: fetch_snapshot(primary, standby, target_db))
+    sessions_collector.start(lambda: fetch_sessions_snapshot(primary), start_delay_sec=0.3)
+    cpu_collector.start(lambda: fetch_cpu_snapshot(primary, standby), start_delay_sec=0.9)
+    lag_collector.start(lambda: fetch_replication_lag_snapshot(primary), start_delay_sec=0.6)
 
 if st.button("Снять новый срез", type="primary", width="stretch"):
     collector.collect_once(lambda: fetch_snapshot(primary, standby, target_db))
+    sessions_collector.collect_once(lambda: fetch_sessions_snapshot(primary))
+    cpu_collector.collect_once(lambda: fetch_cpu_snapshot(primary, standby))
+    lag_collector.collect_once(lambda: fetch_replication_lag_snapshot(primary))
 
 series = build_timeseries(collector.history(), window_minutes)
+sessions_df = build_sessions_df(sessions_collector.history(), window_minutes)
+cpu_df = build_cpu_df(cpu_collector.history(), window_minutes)
+lag_df = build_lag_df(lag_collector.history(), window_minutes)
 if not series:
     st.info("Соберите минимум два среза метрик для отображения графиков.")
 else:
@@ -516,7 +640,7 @@ else:
     with slots[1]:
         line_chart(series["latency"], "metric", "мс", "Latency p95 (мс)", alt.Scale(zero=True))
     with slots[2]:
-        sessions_df = series["sessions"].dropna(subset=["value"])
+        sessions_df = sessions_df.dropna(subset=["value"])
         if sessions_df.empty:
             st.info("Недостаточно данных")
         else:
@@ -533,13 +657,13 @@ else:
             )
             st.altair_chart(theme_chart(chart), width="stretch")
     with slots[3]:
-        line_chart(series["cpu"], "node", "%", "CPU primary / standby (%)", alt.Scale(domain=[0, 100]))
+        line_chart(cpu_df, "node", "%", "CPU primary / standby (%)", alt.Scale(domain=[0, 100]))
     with slots[4]:
         line_chart(series["disk"], "metric", "мс", "Disk latency (Primary, мс)", alt.Scale(zero=True))
     with slots[5]:
         line_chart(series["wal"], "metric", "МБ/с", "WAL generation rate (MB/s)", alt.Scale(zero=True))
     with slots[6]:
-        line_chart(series["lag"], "metric", "сек", "Replication lag (с)", alt.Scale(zero=True))
+        line_chart(lag_df, "metric", "сек", "Replication lag (с)", alt.Scale(zero=True))
 
 if auto_refresh:
     st.caption("Сбор метрик выполняется в фоновом потоке. Интерфейс обновляется отдельно.")
@@ -552,3 +676,6 @@ if auto_refresh:
         st_autorefresh(interval=1000, key=f"cluster-load-refresh-{session_key}")
 else:
     collector.stop()
+    sessions_collector.stop()
+    cpu_collector.stop()
+    lag_collector.stop()
