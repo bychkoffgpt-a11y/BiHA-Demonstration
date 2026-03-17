@@ -523,7 +523,7 @@ def fetch_disk_metrics_via_ssh(node: NodeConfig) -> dict[str, float | int | None
     if not node.control_via_ssh or not node.ssh_host:
         return default_metrics
 
-    remote_cmd = 'bash -lc "iostat -dx 1 2 | awk \'NF && $1 !~ /^(Device|Linux|avg-cpu:)/ {last=$0} END {print last}\'"'
+    remote_cmd = 'bash -lc "LC_ALL=C iostat -dx 1 2"'
     cmd = build_ssh_command(node, remote_cmd)
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
@@ -533,23 +533,71 @@ def fetch_disk_metrics_via_ssh(node: NodeConfig) -> dict[str, float | int | None
     if proc.returncode != 0:
         return default_metrics
 
-    last_line = proc.stdout.strip()
-    if not last_line:
+    raw_output = proc.stdout.strip()
+    if not raw_output:
         return default_metrics
-    parts = last_line.split()
-    if len(parts) < 14:
+    sections = [section.strip() for section in raw_output.split("\n\n") if section.strip() and "Device" in section]
+    if not sections:
         return default_metrics
 
-    try:
-        # iostat -dx: rrqm/s wrqm/s r/s w/s rkB/s wkB/s avgrq-sz avgqu-sz await r_await w_await svctm %util
-        return {
-            "disk_read_kb_s_os": float(parts[5]),
-            "disk_write_kb_s_os": float(parts[6]),
-            "disk_io_queue": int(float(parts[8])),
-            "disk_util_pct_os": float(parts[13]),
-        }
-    except ValueError:
+    lines = [line.strip() for line in sections[-1].splitlines() if line.strip()]
+    header_idx = next((idx for idx, line in enumerate(lines) if line.startswith("Device")), None)
+    if header_idx is None or header_idx + 1 >= len(lines):
         return default_metrics
+
+    headers = lines[header_idx].split()
+    device_rows = [line.split() for line in lines[header_idx + 1 :] if not line.startswith("avg-cpu")]
+    if not device_rows:
+        return default_metrics
+
+    last_row = device_rows[-1]
+    if len(last_row) < len(headers):
+        return default_metrics
+
+    values_by_header = dict(zip(headers, last_row[1:]))
+
+    def parse_metric(candidates: list[str]) -> float | None:
+        for candidate in candidates:
+            value = values_by_header.get(candidate)
+            if value is None:
+                continue
+            try:
+                return float(value)
+            except ValueError:
+                continue
+        return None
+
+    read_kb = parse_metric(["rkB/s", "rKB/s", "kB_read/s", "rMB/s"])
+    write_kb = parse_metric(["wkB/s", "wKB/s", "kB_wrtn/s", "wMB/s"])
+    queue = parse_metric(["aqu-sz", "avgqu-sz"])
+    util = parse_metric(["%util", "util"])
+
+    if read_kb is not None and "rMB/s" in values_by_header:
+        read_kb *= 1024
+    if write_kb is not None and "wMB/s" in values_by_header:
+        write_kb *= 1024
+
+    if read_kb is None and write_kb is None and queue is None and util is None:
+        return default_metrics
+
+    return {
+        "disk_read_kb_s_os": read_kb,
+        "disk_write_kb_s_os": write_kb,
+        "disk_io_queue": queue,
+        "disk_util_pct_os": util,
+    }
+
+
+def format_cluster_table_value(value: Any, decimals: int = 2) -> Any:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return f"{value:,}".replace(",", " ")
+    if isinstance(value, float):
+        return f"{value:,.{decimals}f}".replace(",", " ")
+    return value
 
 
 def run_node_action(node: NodeConfig, action: str) -> tuple[bool, str]:
@@ -787,6 +835,29 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: Bac
             "error": "Error",
         }
     )
+    if not localized_df.empty:
+        numeric_columns = [
+            "Replay delay, sec",
+            "Active locks",
+            "Active queries",
+            "Committed tx",
+            "Rolled back tx",
+            "Blocks read",
+            "Cache hits",
+            "Rows returned",
+            "Rows fetched",
+            "Disk read latency, ms",
+            "Disk write latency, ms",
+            "Disk queue",
+            "OS disk read, KB/s",
+            "OS disk write, KB/s",
+            "OS disk util, %",
+        ]
+        for column in numeric_columns:
+            if column in localized_df.columns:
+                localized_df[column] = localized_df[column].map(format_cluster_table_value)
+        if "Error" in localized_df.columns:
+            localized_df["Error"] = localized_df["Error"].fillna("")
     st.caption(f"Целевая БД нагрузки (Target DB): {target_db}")
     if snap["updated_at"] is not None:
         st.caption(f"Последнее обновление метрик: {snap['updated_at'].strftime('%H:%M:%S')}")
@@ -841,16 +912,16 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: Bac
 
         with chart_cols[0]:
             st.caption("Запросы и ошибки (Queries and errors)")
-            st.line_chart(chart_df[["read_tx", "write_tx", "errors"]], height=160)
+            st.line_chart(chart_df[["read_tx", "write_tx", "errors"]], height=320)
 
         with chart_cols[1]:
             st.caption("Блокировки и активные запросы (Locks and active queries)")
-            st.line_chart(chart_df[["active_locks", "active_queries"]], height=160)
+            st.line_chart(chart_df[["active_locks", "active_queries"]], height=320)
 
         with chart_cols[2]:
             st.caption("Нагрузка на диски по узлам (Disk load per node)")
             if disk_cols:
-                st.line_chart(chart_df[disk_cols], height=160)
+                st.line_chart(chart_df[disk_cols], height=320)
             else:
                 st.info("Пока нет данных по дискам")
 
