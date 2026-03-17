@@ -46,6 +46,7 @@ class NodeConfig:
     ssh_legacy_algorithms: bool = False
     service_name: str = "postgrespro"
     collect_disk_metrics_via_ssh: bool = True
+    disk_device: str | None = None
 
 
 @dataclass
@@ -55,18 +56,30 @@ class ClusterConfig:
 
 
 class WorkloadGenerator:
-    """Background session workers generating pgbench-like read/write load."""
+    """Фоновый генератор pgbench-подобной нагрузки с динамическим масштабированием."""
+
+    @dataclass
+    class _WorkerSlot:
+        thread: threading.Thread
+        stop_event: threading.Event
 
     def __init__(self) -> None:
-        self._threads: list[threading.Thread] = []
+        self._workers: list[WorkloadGenerator._WorkerSlot] = []
         self._stop_event = threading.Event()
+        self._manager_thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._settings_lock = threading.Lock()
         self._stats: dict[str, int] = {"read_tx": 0, "write_tx": 0, "errors": 0}
         self._recent_errors: list[dict[str, Any]] = []
+        self._cluster: ClusterConfig | None = None
+        self._mode: str = "single-node"
+        self._read_ratio: float = 0.7
+        self._desired_workers: int = 1
+        self._sizing: PgLikeSizing = estimate_pg_like_sizing(DEFAULT_WORKLOAD_DB_SIZE_GB)
 
     @property
     def running(self) -> bool:
-        return any(thread.is_alive() for thread in self._threads)
+        return self._manager_thread is not None and self._manager_thread.is_alive()
 
     def stats_snapshot(self) -> dict[str, int]:
         with self._lock:
@@ -82,33 +95,83 @@ class WorkloadGenerator:
         with self._lock:
             return list(self._recent_errors)
 
-    def start(self, cluster: ClusterConfig, mode: str, sessions: int, read_ratio: float) -> None:
+    def start(self, cluster: ClusterConfig, mode: str, clients: int, threads_per_client: int, read_ratio: float) -> None:
+        self.update_settings(cluster, mode, clients, threads_per_client, read_ratio)
         if self.running:
             return
         self._stop_event.clear()
-        workers = max(1, min(MAX_WORKERS, sessions))
-        sizing = estimate_pg_like_sizing(float(st.session_state.get("target_size_gb", DEFAULT_WORKLOAD_DB_SIZE_GB)))
-        self._threads = []
-        for _ in range(workers):
-            thread = threading.Thread(
-                target=self._run_worker,
-                args=(cluster, mode, read_ratio, sizing),
-                daemon=True,
-            )
-            self._threads.append(thread)
-            thread.start()
+
+        self._manager_thread = threading.Thread(target=self._manage_workers, daemon=True, name="workload-manager")
+        self._manager_thread.start()
+
+    def update_settings(
+        self, cluster: ClusterConfig, mode: str, clients: int, threads_per_client: int, read_ratio: float
+    ) -> None:
+        target_size_gb = float(st.session_state.get("target_size_gb", DEFAULT_WORKLOAD_DB_SIZE_GB))
+        desired_workers = max(1, min(MAX_WORKERS, clients * threads_per_client))
+        with self._settings_lock:
+            self._cluster = cluster
+            self._mode = mode
+            self._read_ratio = read_ratio
+            self._desired_workers = desired_workers
+            self._sizing = estimate_pg_like_sizing(target_size_gb)
 
     def stop(self) -> None:
         self._stop_event.set()
-        for thread in self._threads:
-            thread.join(timeout=2)
-        self._threads = []
+        if self._manager_thread:
+            self._manager_thread.join(timeout=2)
+        self._manager_thread = None
+        self._stop_all_workers()
 
-    def _run_worker(self, cluster: ClusterConfig, mode: str, read_ratio: float, sizing: PgLikeSizing) -> None:
+    def _manage_workers(self) -> None:
         while not self._stop_event.is_set():
+            self._sync_workers()
+            self._stop_event.wait(0.2)
+        self._stop_all_workers()
+
+    def _stop_all_workers(self) -> None:
+        workers = list(self._workers)
+        self._workers = []
+        for worker in workers:
+            worker.stop_event.set()
+        for worker in workers:
+            worker.thread.join(timeout=2)
+
+    def _sync_workers(self) -> None:
+        alive_workers: list[WorkloadGenerator._WorkerSlot] = []
+        for worker in self._workers:
+            if worker.thread.is_alive():
+                alive_workers.append(worker)
+        self._workers = alive_workers
+
+        with self._settings_lock:
+            desired_workers = self._desired_workers
+
+        while len(self._workers) > desired_workers:
+            worker = self._workers.pop()
+            worker.stop_event.set()
+            worker.thread.join(timeout=2)
+
+        while len(self._workers) < desired_workers and not self._stop_event.is_set():
+            worker_stop_event = threading.Event()
+            thread = threading.Thread(target=self._run_worker, args=(worker_stop_event,), daemon=True)
+            slot = WorkloadGenerator._WorkerSlot(thread=thread, stop_event=worker_stop_event)
+            self._workers.append(slot)
+            thread.start()
+
+    def _run_worker(self, worker_stop_event: threading.Event) -> None:
+        while not self._stop_event.is_set() and not worker_stop_event.is_set():
             node: NodeConfig | None = None
             write_tx = False
             try:
+                with self._settings_lock:
+                    cluster = self._cluster
+                    mode = self._mode
+                    read_ratio = self._read_ratio
+                    sizing = self._sizing
+                if cluster is None:
+                    raise RuntimeError("Cluster config is not initialized")
+
                 write_tx = random.random() > read_ratio
                 node = select_node_for_workload(cluster.nodes, mode, write_tx)
                 if not node:
@@ -550,32 +613,64 @@ def fetch_disk_metrics_via_ssh(node: NodeConfig) -> dict[str, float | int | None
     if not device_rows:
         return default_metrics
 
-    last_row = device_rows[-1]
-    if len(last_row) < len(headers):
-        return default_metrics
+    if node.disk_device:
+        requested_device = node.disk_device.strip()
+        requested_aliases = {requested_device, requested_device.removeprefix("/dev/")}
+        filtered_rows = [row for row in device_rows if row and row[0] in requested_aliases]
+        if not filtered_rows:
+            return default_metrics
+        device_rows = filtered_rows
 
-    values_by_header = dict(zip(headers, last_row[1:]))
+    totals = {
+        "disk_read_kb_s_os": 0.0,
+        "disk_write_kb_s_os": 0.0,
+        "disk_io_queue": 0.0,
+        "disk_util_pct_os": 0.0,
+    }
+    found = {key: False for key in totals}
 
-    def parse_metric(candidates: list[str]) -> float | None:
+    def parse_metric(values_by_header: dict[str, str], candidates: list[str]) -> tuple[float | None, str | None]:
         for candidate in candidates:
             value = values_by_header.get(candidate)
             if value is None:
                 continue
             try:
-                return float(value)
+                return float(value), candidate
             except ValueError:
                 continue
-        return None
+        return None, None
 
-    read_kb = parse_metric(["rkB/s", "rKB/s", "kB_read/s", "rMB/s"])
-    write_kb = parse_metric(["wkB/s", "wKB/s", "kB_wrtn/s", "wMB/s"])
-    queue = parse_metric(["aqu-sz", "avgqu-sz"])
-    util = parse_metric(["%util", "util"])
+    for row in device_rows:
+        if len(row) < len(headers):
+            continue
+        values_by_header = dict(zip(headers[1:], row[1:]))
 
-    if read_kb is not None and "rMB/s" in values_by_header:
-        read_kb *= 1024
-    if write_kb is not None and "wMB/s" in values_by_header:
-        write_kb *= 1024
+        read_kb, read_key = parse_metric(values_by_header, ["rkB/s", "rKB/s", "kB_read/s", "rMB/s"])
+        write_kb, write_key = parse_metric(values_by_header, ["wkB/s", "wKB/s", "kB_wrtn/s", "wMB/s"])
+        queue, _ = parse_metric(values_by_header, ["aqu-sz", "avgqu-sz"])
+        util, _ = parse_metric(values_by_header, ["%util", "util"])
+
+        if read_kb is not None:
+            if read_key == "rMB/s":
+                read_kb *= 1024
+            totals["disk_read_kb_s_os"] += read_kb
+            found["disk_read_kb_s_os"] = True
+        if write_kb is not None:
+            if write_key == "wMB/s":
+                write_kb *= 1024
+            totals["disk_write_kb_s_os"] += write_kb
+            found["disk_write_kb_s_os"] = True
+        if queue is not None:
+            totals["disk_io_queue"] += queue
+            found["disk_io_queue"] = True
+        if util is not None:
+            totals["disk_util_pct_os"] += util
+            found["disk_util_pct_os"] = True
+
+    read_kb = totals["disk_read_kb_s_os"] if found["disk_read_kb_s_os"] else None
+    write_kb = totals["disk_write_kb_s_os"] if found["disk_write_kb_s_os"] else None
+    queue = totals["disk_io_queue"] if found["disk_io_queue"] else None
+    util = totals["disk_util_pct_os"] if found["disk_util_pct_os"] else None
 
     if read_kb is None and write_kb is None and queue is None and util is None:
         return default_metrics
@@ -641,7 +736,8 @@ def render_sidebar() -> dict[str, Any]:
 
     defaults = {
         "load_mode": "single-node",
-        "load_sessions": 10,
+        "load_clients": 10,
+        "load_threads_per_client": 1,
         "load_read_ratio": 0.7,
         "load_auto_refresh": True,
     }
@@ -655,24 +751,55 @@ def render_sidebar() -> dict[str, Any]:
         if key not in st.session_state:
             st.session_state[key] = st.session_state[persistent_key]
 
+    # Sync exact number inputs to slider-backed values before widgets are instantiated.
+    # Streamlit does not allow changing widget state after the widget with the same key is created.
+    for key in ("load_clients", "load_threads_per_client"):
+        input_key = f"{key}_input"
+        if input_key not in st.session_state:
+            st.session_state[input_key] = int(st.session_state[key])
+        elif int(st.session_state[input_key]) != int(st.session_state[key]):
+            st.session_state[key] = int(st.session_state[input_key])
+
     mode = st.sidebar.selectbox(
         "Режим (Mode)",
         options=["single-node", "dual-read", "master-rw-slave-r"],
         help="single-node: вся нагрузка на master; dual-read: чтение с обеих; master-rw-slave-r: запись на master, чтение с slave",
         key="load_mode",
     )
-    sessions = st.sidebar.slider(
-        "Клиентские сессии (Client sessions)", min_value=1, max_value=200, step=1, key="load_sessions"
+    clients = st.sidebar.slider("Количество клиентов", min_value=1, max_value=64, step=1, key="load_clients")
+    clients = st.sidebar.number_input("Клиенты (точное значение)", min_value=1, max_value=64, step=1, key="load_clients_input", value=int(clients))
+
+    threads_per_client = st.sidebar.slider(
+        "Потоков на клиента", min_value=1, max_value=8, step=1, key="load_threads_per_client"
     )
+    threads_per_client = st.sidebar.number_input(
+        "Потоки на клиента (точное значение)",
+        min_value=1,
+        max_value=8,
+        step=1,
+        key="load_threads_per_client_input",
+        value=int(threads_per_client),
+    )
+
+    total_workers = min(MAX_WORKERS, int(clients) * int(threads_per_client))
+    st.sidebar.caption(f"Итого рабочих потоков генератора: {total_workers} (лимит: {MAX_WORKERS})")
     read_ratio = st.sidebar.slider("Доля чтения (Read ratio)", 0.0, 1.0, step=0.05, key="load_read_ratio")
     auto_refresh = st.sidebar.checkbox("Автообновление (Auto-refresh)", key="load_auto_refresh")
 
     st.session_state.persist_load_mode = mode
-    st.session_state.persist_load_sessions = sessions
+    st.session_state.persist_load_clients = int(clients)
+    st.session_state.persist_load_threads_per_client = int(threads_per_client)
     st.session_state.persist_load_read_ratio = read_ratio
     st.session_state.persist_load_auto_refresh = auto_refresh
 
-    return {"mode": mode, "sessions": sessions, "read_ratio": read_ratio, "auto_refresh": auto_refresh}
+    return {
+        "mode": mode,
+        "clients": int(clients),
+        "threads_per_client": int(threads_per_client),
+        "total_workers": total_workers,
+        "read_ratio": read_ratio,
+        "auto_refresh": auto_refresh,
+    }
 
 
 def apply_compact_top_styles() -> None:
@@ -752,7 +879,13 @@ def render_controls(
     scenario_cols = st.columns(5)
 
     if scenario_cols[0].button("▶ Start load", use_container_width=True, key="scenario_start_load"):
-        wg.start(cluster, profile["mode"], int(profile["sessions"]), float(profile["read_ratio"]))
+        wg.start(
+            cluster,
+            profile["mode"],
+            int(profile["clients"]),
+            int(profile["threads_per_client"]),
+            float(profile["read_ratio"]),
+        )
         st.rerun()
     if scenario_cols[1].button("⏹ Stop load", use_container_width=True, key="scenario_stop_load"):
         wg.stop()
@@ -775,20 +908,16 @@ def render_controls(
     for idx, node in enumerate(cluster.nodes):
         with host_cols[idx]:
             is_running = node_statuses.get(node.name) == "up"
-            button_label = "🟢 Хост запущен" if is_running else "🔴 Хост остановлен"
-            action = "stop" if is_running else "start"
+            button_label = "⏹ Остановить хост" if is_running else "🔴 Хост остановлен"
 
             st.write(f"**{node.name}** ({node.role_hint})")
-            if st.button(button_label, key=f"failure-toggle-{node.name}", use_container_width=True):
-                ok, msg = run_node_action(node, action)
-                verb = "остановка" if action == "stop" else "запуск"
-                st.toast(f"{node.name} {verb}: {'OK' if ok else 'ERR'} | {msg}")
-                st.rerun()
-
-            if st.button("🔄 Перезапуск", key=f"failure-restart-{node.name}", use_container_width=True):
-                ok, msg = run_node_action(node, "restart")
-                st.toast(f"{node.name} перезапуск: {'OK' if ok else 'ERR'} | {msg}")
-                st.rerun()
+            if is_running:
+                if st.button(button_label, key=f"failure-stop-{node.name}", use_container_width=True):
+                    ok, msg = run_node_action(node, "stop")
+                    st.toast(f"{node.name} остановка: {'OK' if ok else 'ERR'} | {msg}")
+                    st.rerun()
+            else:
+                st.button(button_label, key=f"failure-state-{node.name}", use_container_width=True, disabled=True)
 
 
 def reset_server_stats(cluster: ClusterConfig) -> None:
@@ -890,6 +1019,11 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: Bac
         st.warning("Нет подключений к узлам БД. Проверьте доступность PostgreSQL и параметры DSN/SSH в конфиге.")
     stats = wg.stats_snapshot()
     st.info(f"Статус генератора нагрузки (Load generator status): {'🟢 РАБОТАЕТ' if wg.running else '🔴 ОСТАНОВЛЕН'}")
+    st.caption(
+        f"Параметры нагрузки: клиентов={st.session_state.get('load_clients', 1)}, "
+        f"потоков на клиента={st.session_state.get('load_threads_per_client', 1)}, "
+        f"рабочих потоков={min(MAX_WORKERS, int(st.session_state.get('load_clients', 1)) * int(st.session_state.get('load_threads_per_client', 1)))}"
+    )
 
     st.subheader("Статистика нагрузки (Load stats)")
     stat_cols = st.columns(3)
@@ -966,6 +1100,14 @@ def main() -> None:
     wg: WorkloadGenerator = st.session_state.workload_generator
     collector: BackgroundMetricsCollector = st.session_state.metrics_collector
     profile = render_sidebar()
+
+    wg.update_settings(
+        cluster,
+        profile["mode"],
+        int(profile["clients"]),
+        int(profile["threads_per_client"]),
+        float(profile["read_ratio"]),
+    )
 
     current_signature = build_cluster_signature(cluster)
     if collector.cluster_signature != current_signature or not collector.running:
