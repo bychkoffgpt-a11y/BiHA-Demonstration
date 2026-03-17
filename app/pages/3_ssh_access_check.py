@@ -31,6 +31,7 @@ class NodeConfig:
     ssh_legacy_algorithms: bool = False
     service_name: str = "postgrespro"
     collect_disk_metrics_via_ssh: bool = True
+    disk_device: str | None = None
 
 
 @dataclass
