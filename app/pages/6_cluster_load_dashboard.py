@@ -4,6 +4,7 @@ import json
 import shlex
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Callable
@@ -12,7 +13,6 @@ import altair as alt
 import pandas as pd
 import psycopg
 import streamlit as st
-import streamlit.components.v1 as components
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -565,120 +565,116 @@ def schedule_ui_refresh(interval_ms: int, key: str) -> None:
         st_autorefresh(interval=interval_ms, key=key)
         return
 
-    components.html(
-        f"""
-        <script>
-        setTimeout(function () {{
-            window.parent.location.reload();
-        }}, {interval_ms});
-        </script>
-        """,
-        height=0,
-        width=0,
-    )
+    time.sleep(interval_ms / 1000)
+    st.rerun()
 
 
-st.set_page_config(page_title="Экран производительности кластера", layout="wide")
-st.title("Экран производительности кластера")
-st.caption("Верхний ряд — результат нагрузки, нижний ряд — цена и устойчивость кластера.")
+def render_dashboard() -> None:
+    st.set_page_config(page_title="Экран производительности кластера", layout="wide")
+    st.title("Экран производительности кластера")
+    st.caption("Верхний ряд — результат нагрузки, нижний ряд — цена и устойчивость кластера.")
 
-cfg_path = Path(st.text_input("Путь к конфигу", "config/cluster.json"))
-if not cfg_path.exists():
-    st.error(f"Конфиг не найден: {cfg_path}")
-    st.stop()
+    cfg_path = Path(st.text_input("Путь к конфигу", "config/cluster.json"))
+    if not cfg_path.exists():
+        st.error(f"Конфиг не найден: {cfg_path}")
+        st.stop()
 
-cluster = load_cluster_config(cfg_path)
-if not cluster.nodes:
-    st.error("В конфиге не найдено узлов")
-    st.stop()
+    cluster = load_cluster_config(cfg_path)
+    if not cluster.nodes:
+        st.error("В конфиге не найдено узлов")
+        st.stop()
 
-primary = next((n for n in cluster.nodes if n.role_hint.lower() in {"master", "primary", "leader"}), cluster.nodes[0])
-standby = next((n for n in cluster.nodes if n.role_hint.lower() in {"slave", "replica", "standby"}), None)
+    primary = next((n for n in cluster.nodes if n.role_hint.lower() in {"master", "primary", "leader"}), cluster.nodes[0])
+    standby = next((n for n in cluster.nodes if n.role_hint.lower() in {"slave", "replica", "standby"}), None)
 
-target_db = st.text_input("Рабочая БД для TPS", "postgres")
-col1, col2, col3 = st.columns(3)
-auto_refresh = col1.checkbox("Автообновление", value=True)
-interval_sec = col2.select_slider("Шаг агрегации (сек)", options=[5, 10, 15, 30], value=10)
-window_minutes = col3.select_slider("Интервал по X (мин)", options=[15, 30, 45, 60], value=30)
-compact_grid = st.checkbox("Вертикальная сетка (4 ряда × 2 графика)", value=False)
+    target_db = st.text_input("Рабочая БД для TPS", "postgres")
+    col1, col2, col3 = st.columns(3)
+    auto_refresh = col1.checkbox("Автообновление", value=True)
+    interval_sec = col2.select_slider("Шаг агрегации (сек)", options=[5, 10, 15, 30], value=10)
+    window_minutes = col3.select_slider("Интервал по X (мин)", options=[15, 30, 45, 60], value=30)
+    compact_grid = st.checkbox("Вертикальная сетка (4 ряда × 2 графика)", value=False)
 
-history_limit = int((window_minutes * 60) / interval_sec) + 30
+    history_limit = int((window_minutes * 60) / interval_sec) + 30
 
-session_key = f"{primary.name}|{standby.name if standby else 'none'}|{target_db}"
-collector = get_async_collector(session_key, interval_sec, history_limit)
-collector.update(interval_sec=interval_sec, history_limit=history_limit)
+    session_key = f"{primary.name}|{standby.name if standby else 'none'}|{target_db}"
+    collector = get_async_collector(session_key, interval_sec, history_limit)
+    collector.update(interval_sec=interval_sec, history_limit=history_limit)
 
-if auto_refresh:
-    collector.start(lambda: fetch_snapshot(primary, standby, target_db))
+    if auto_refresh:
+        collector.start(lambda: fetch_snapshot(primary, standby, target_db))
 
-if st.button("Снять новый срез", type="primary", width="stretch"):
-    collector.collect_once(lambda: fetch_snapshot(primary, standby, target_db))
+    if st.button("Снять новый срез", type="primary", width="stretch"):
+        collector.collect_once(lambda: fetch_snapshot(primary, standby, target_db))
 
-series = build_timeseries(collector.history(), window_minutes)
-if not series:
-    st.info("Соберите минимум два среза метрик для отображения графиков.")
-else:
-    def render_sessions_chart() -> None:
-        sessions_df = series["sessions"].dropna(subset=["value"])
-        if sessions_df.empty:
-            st.info("Недостаточно данных")
-        else:
-            chart = (
-                alt.Chart(sessions_df)
-                .mark_area(opacity=0.85)
-                .encode(
-                    x=alt.X("timestamp:T", title="Время"),
-                    y=alt.Y("value:Q", title="число сессий", stack="zero"),
-                    color=alt.Color("state:N", legend=alt.Legend(title=None)),
-                    tooltip=["timestamp:T", "state:N", alt.Tooltip("value:Q", format=".0f")],
+    series = build_timeseries(collector.history(), window_minutes)
+    if not series:
+        st.info("Соберите минимум два среза метрик для отображения графиков.")
+    else:
+        def render_sessions_chart() -> None:
+            sessions_df = series["sessions"].dropna(subset=["value"])
+            if sessions_df.empty:
+                st.info("Недостаточно данных")
+            else:
+                chart = (
+                    alt.Chart(sessions_df)
+                    .mark_area(opacity=0.85)
+                    .encode(
+                        x=alt.X("timestamp:T", title="Время"),
+                        y=alt.Y("value:Q", title="число сессий", stack="zero"),
+                        color=alt.Color("state:N", legend=alt.Legend(title=None)),
+                        tooltip=["timestamp:T", "state:N", alt.Tooltip("value:Q", format=".0f")],
+                    )
+                    .properties(title="Active sessions by state", height=260)
                 )
-                .properties(title="Active sessions by state", height=260)
-            )
-            st.altair_chart(theme_chart(chart), width="stretch")
+                st.altair_chart(theme_chart(chart), width="stretch")
+    
+        def render_tps_chart() -> None:
+            line_chart(series["tps"], "metric", "транзакции/с", "TPS (транзакции/с)", alt.Scale(zero=True))
+    
+        def render_latency_chart() -> None:
+            line_chart(series["latency"], "metric", "мс", "Latency p95 (мс)", alt.Scale(zero=True))
+    
+        def render_cpu_chart() -> None:
+            line_chart(series["cpu"], "node", "%", "CPU primary / standby (%)", alt.Scale(domain=[0, 100]))
+    
+        def render_disk_chart() -> None:
+            line_chart(series["disk"], "metric", "мс", "Disk latency (Primary, мс)", alt.Scale(zero=True))
+    
+        def render_wal_chart() -> None:
+            line_chart(series["wal"], "metric", "МБ/с", "WAL generation rate (MB/s)", alt.Scale(zero=True))
+    
+        charts: list[Callable[[], None]] = [
+            render_tps_chart,
+            render_latency_chart,
+            render_sessions_chart,
+            render_cpu_chart,
+            render_disk_chart,
+            render_wal_chart,
+        ]
 
-    def render_tps_chart() -> None:
-        line_chart(series["tps"], "metric", "транзакции/с", "TPS (транзакции/с)", alt.Scale(zero=True))
-
-    def render_latency_chart() -> None:
-        line_chart(series["latency"], "metric", "мс", "Latency p95 (мс)", alt.Scale(zero=True))
-
-    def render_cpu_chart() -> None:
-        line_chart(series["cpu"], "node", "%", "CPU primary / standby (%)", alt.Scale(domain=[0, 100]))
-
-    def render_disk_chart() -> None:
-        line_chart(series["disk"], "metric", "мс", "Disk latency (Primary, мс)", alt.Scale(zero=True))
-
-    def render_wal_chart() -> None:
-        line_chart(series["wal"], "metric", "МБ/с", "WAL generation rate (MB/s)", alt.Scale(zero=True))
-
-    charts: list[Callable[[], None]] = [
-        render_tps_chart,
-        render_latency_chart,
-        render_sessions_chart,
-        render_cpu_chart,
-        render_disk_chart,
-        render_wal_chart,
-    ]
-
-    if compact_grid:
-        for idx in range(0, len(charts), 2):
-            row_cols = st.columns(2)
-            for col, chart_renderer in zip(row_cols, charts[idx : idx + 2], strict=False):
+        if compact_grid:
+            for idx in range(0, len(charts), 2):
+                row_cols = st.columns(2)
+                for col, chart_renderer in zip(row_cols, charts[idx : idx + 2], strict=False):
+                    with col:
+                        chart_renderer()
+        else:
+            first_row = st.columns(4)
+            for col, chart_renderer in zip(first_row, charts[:4], strict=True):
                 with col:
                     chart_renderer()
+    
+            second_row = st.columns(2)
+            for col, chart_renderer in zip(second_row, charts[4:], strict=True):
+                with col:
+                    chart_renderer()
+
+    if auto_refresh:
+        st.caption("Сбор метрик выполняется в фоновом потоке. Интерфейс обновляется отдельно.")
+        schedule_ui_refresh(interval_ms=1000, key=f"cluster-load-refresh-{session_key}")
     else:
-        first_row = st.columns(4)
-        for col, chart_renderer in zip(first_row, charts[:4], strict=True):
-            with col:
-                chart_renderer()
+        collector.stop()
 
-        second_row = st.columns(2)
-        for col, chart_renderer in zip(second_row, charts[4:], strict=True):
-            with col:
-                chart_renderer()
 
-if auto_refresh:
-    st.caption("Сбор метрик выполняется в фоновом потоке. Интерфейс обновляется отдельно.")
-    schedule_ui_refresh(interval_ms=1000, key=f"cluster-load-refresh-{session_key}")
-else:
-    collector.stop()
+if __name__ == "__main__":
+    render_dashboard()
