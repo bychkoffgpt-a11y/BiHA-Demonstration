@@ -12,6 +12,7 @@ import altair as alt
 import pandas as pd
 import psycopg
 import streamlit as st
+import streamlit.components.v1 as components
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -559,6 +560,24 @@ def line_chart(df: pd.DataFrame, color_field: str, y_title: str, title: str, y_s
     st.altair_chart(theme_chart(chart), width="stretch")
 
 
+def schedule_ui_refresh(interval_ms: int, key: str) -> None:
+    if st_autorefresh is not None:
+        st_autorefresh(interval=interval_ms, key=key)
+        return
+
+    components.html(
+        f"""
+        <script>
+        setTimeout(function () {{
+            window.parent.location.reload();
+        }}, {interval_ms});
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
 st.set_page_config(page_title="Экран производительности кластера", layout="wide")
 st.title("Экран производительности кластера")
 st.caption("Верхний ряд — результат нагрузки, нижний ряд — цена и устойчивость кластера.")
@@ -660,9 +679,6 @@ else:
 
 if auto_refresh:
     st.caption("Сбор метрик выполняется в фоновом потоке. Интерфейс обновляется отдельно.")
-    if st_autorefresh is None:
-        st.warning("Автообновление недоступно: установите пакет streamlit-autorefresh.")
-    else:
-        st_autorefresh(interval=1000, key=f"cluster-load-refresh-{session_key}")
+    schedule_ui_refresh(interval_ms=1000, key=f"cluster-load-refresh-{session_key}")
 else:
     collector.stop()
