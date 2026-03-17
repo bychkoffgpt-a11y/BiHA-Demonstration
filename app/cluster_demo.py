@@ -696,34 +696,58 @@ def apply_compact_top_styles() -> None:
 
 def render_controls(cluster: ClusterConfig, wg: WorkloadGenerator, profile: dict[str, Any]) -> None:
     st.subheader("Управление сценарием (Scenario controls)")
-    col1, col2, col3, col4, col5 = st.columns(5)
-
-    if col1.button("Запустить нагрузку (Start load)", type="primary", width="stretch"):
+    scenario_actions = {
+        "— Select action —": None,
+        "Start load": "start_load",
+        "Stop load": "stop_load",
+        "Reset counters": "reset_counters",
+        "Reset server stats": "reset_server_stats",
+        "Refresh now": "refresh_now",
+    }
+    selected_scenario_action = st.selectbox(
+        "Scenario action",
+        options=list(scenario_actions.keys()),
+        key="scenario_action_select",
+        label_visibility="collapsed",
+    )
+    scenario_action = scenario_actions[selected_scenario_action]
+    if scenario_action == "start_load":
         wg.start(cluster, profile["mode"], int(profile["sessions"]), float(profile["read_ratio"]))
-    if col2.button("Остановить нагрузку (Stop load)", width="stretch"):
+        st.session_state.scenario_action_select = "— Select action —"
+        st.rerun()
+    if scenario_action == "stop_load":
         wg.stop()
-    if col3.button("Сбросить счётчики (Reset counters)", width="stretch"):
+        st.session_state.scenario_action_select = "— Select action —"
+        st.rerun()
+    if scenario_action == "reset_counters":
         wg.reset_stats()
-    if col4.button("Сбросить серверную статистику (Reset server stats)", width="stretch"):
+        st.session_state.scenario_action_select = "— Select action —"
+        st.rerun()
+    if scenario_action == "reset_server_stats":
         reset_server_stats(cluster)
-    if col5.button("Обновить сейчас (Refresh now)", width="stretch"):
+        st.session_state.scenario_action_select = "— Select action —"
+        st.rerun()
+    if scenario_action == "refresh_now":
+        st.session_state.scenario_action_select = "— Select action —"
         st.rerun()
 
-    st.caption(f"Состояние генератора (Generator state): {'RUNNING' if wg.running else 'STOPPED'}")
     st.markdown("#### Симуляция отказа (Failure simulation)")
 
     for node in cluster.nodes:
-        c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+        c1, c2 = st.columns([2, 3])
         c1.write(f"**{node.name}** ({node.role_hint})")
-        if c2.button(f"Остановить (Stop) {node.name}", key=f"stop-{node.name}"):
-            ok, msg = run_node_action(node, "stop")
-            st.toast(f"{node.name} stop: {'OK' if ok else 'ERR'} | {msg}")
-        if c3.button(f"Запустить (Start) {node.name}", key=f"start-{node.name}"):
-            ok, msg = run_node_action(node, "start")
-            st.toast(f"{node.name} start: {'OK' if ok else 'ERR'} | {msg}")
-        if c4.button(f"Перезапустить (Restart) {node.name}", key=f"restart-{node.name}"):
-            ok, msg = run_node_action(node, "restart")
-            st.toast(f"{node.name} restart: {'OK' if ok else 'ERR'} | {msg}")
+        node_select_key = f"failure-action-{node.name}"
+        selected_failure_action = c2.selectbox(
+            f"Failure action for {node.name}",
+            options=["— Select action —", "Stop", "Start", "Restart"],
+            key=node_select_key,
+            label_visibility="collapsed",
+        )
+        if selected_failure_action != "— Select action —":
+            ok, msg = run_node_action(node, selected_failure_action.lower())
+            st.toast(f"{node.name} {selected_failure_action.lower()}: {'OK' if ok else 'ERR'} | {msg}")
+            st.session_state[node_select_key] = "— Select action —"
+            st.rerun()
 
 
 def reset_server_stats(cluster: ClusterConfig) -> None:
@@ -755,30 +779,30 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: Bac
             df["status"].map({"up": "🟢", "down": "🔴"}).fillna("⚪"),
         )
     if not df.empty:
-        df["status"] = df["status"].map({"up": "РАБОТАЕТ (UP)", "down": "НЕ РАБОТАЕТ (DOWN)"}).fillna(df["status"])
+        df["status"] = df["status"].map({"up": "UP", "down": "DOWN"}).fillna(df["status"])
     localized_df = df.rename(
         columns={
-            "status_icon": "Сост. (State)",
-            "node": "Узел (Node)",
-            "status": "Статус (Status)",
-            "role": "Роль (Role)",
-            "replay_delay_sec": "Задержка реплея, с (Replay delay, sec)",
-            "active_locks": "Активные блокировки (Active locks)",
-            "active_queries": "Активные запросы (Active queries)",
-            "xact_commit": "Подтверждённые транзакции (Committed tx)",
-            "xact_rollback": "Откаты транзакций (Rolled back tx)",
-            "blks_read": "Блоков с диска (Blocks read)",
-            "blks_hit": "Попаданий в кэш (Cache hits)",
-            "tup_returned": "Возвращено строк (Rows returned)",
-            "tup_fetched": "Извлечено строк (Rows fetched)",
-            "blk_read_time_ms": "Задержка чтения диска, мс (Disk read latency, ms)",
-            "blk_write_time_ms": "Задержка записи диска, мс (Disk write latency, ms)",
-            "disk_io_queue": "Очередь к диску (Disk queue)",
-            "disk_read_kb_s_os": "Чтение диска ОС, КБ/с (OS disk read, KB/s)",
-            "disk_write_kb_s_os": "Запись диска ОС, КБ/с (OS disk write, KB/s)",
-            "disk_util_pct_os": "Утилизация диска ОС, % (OS disk util, %)",
-            "tx_read_only": "Режим транзакции (Tx read-only)",
-            "error": "Ошибка (Error)",
+            "status_icon": "State",
+            "node": "Node",
+            "status": "Status",
+            "role": "Role",
+            "replay_delay_sec": "Replay delay, sec",
+            "active_locks": "Active locks",
+            "active_queries": "Active queries",
+            "xact_commit": "Committed tx",
+            "xact_rollback": "Rolled back tx",
+            "blks_read": "Blocks read",
+            "blks_hit": "Cache hits",
+            "tup_returned": "Rows returned",
+            "tup_fetched": "Rows fetched",
+            "blk_read_time_ms": "Disk read latency, ms",
+            "blk_write_time_ms": "Disk write latency, ms",
+            "disk_io_queue": "Disk queue",
+            "disk_read_kb_s_os": "OS disk read, KB/s",
+            "disk_write_kb_s_os": "OS disk write, KB/s",
+            "disk_util_pct_os": "OS disk util, %",
+            "tx_read_only": "Tx read-only",
+            "error": "Error",
         }
     )
     st.caption(f"Целевая БД нагрузки (Target DB): {target_db}")
@@ -788,6 +812,9 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: Bac
     header_height_px = 38
     table_height = max(105, min(190, header_height_px + len(localized_df) * row_height_px))
     st.dataframe(localized_df, width="stretch", height=table_height, hide_index=True)
+    st.caption(
+        "Data source: PostgreSQL system views (pg_stat_database, pg_stat_activity, pg_locks, pg_last_xact_replay_timestamp) and SSH iostat -dx."
+    )
     if snap["error"]:
         st.warning(f"Ошибка фонового сборщика метрик: {snap['error']}")
 
@@ -852,7 +879,8 @@ def main() -> None:
     st.title(APP_TITLE)
     st.caption("Демо-интерфейс для проверки кластера BiHA PostgreSQL Pro (Demo GUI for BiHA PostgreSQL Pro cluster validation)")
 
-    cfg_path = Path(st.text_input("Путь к конфигу (Path to config)", "config/cluster.json"))
+    st.session_state.setdefault("cfg_path", "config/cluster.json")
+    cfg_path = Path(st.session_state["cfg_path"])
     if not cfg_path.exists():
         st.error(f"Конфиг не найден (Config not found): {cfg_path}")
         st.stop()
@@ -883,6 +911,9 @@ def main() -> None:
 
     render_controls(cluster, wg, profile)
     render_metrics(cluster, wg, collector)
+
+    st.divider()
+    st.text_input("Путь к конфигу (Path to config)", key="cfg_path")
 
     if profile["auto_refresh"]:
         time.sleep(cluster.poll_interval_sec)
