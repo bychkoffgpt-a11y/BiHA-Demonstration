@@ -71,7 +71,8 @@ streamlit run app/cluster_demo.py
       "ssh_legacy_algorithms": false,
       "ssh_extra_options": ["ServerAliveInterval=15", "ServerAliveCountMax=3"],
       "service_name": "postgrespro",
-      "collect_disk_metrics_via_ssh": true
+      "collect_disk_metrics_via_ssh": true,
+      "disk_device": "/dev/sda"
     },
     {
       "name": "node2-slave",
@@ -85,7 +86,8 @@ streamlit run app/cluster_demo.py
       "ssh_legacy_algorithms": false,
       "ssh_extra_options": ["ServerAliveInterval=15", "ServerAliveCountMax=3"],
       "service_name": "postgrespro",
-      "collect_disk_metrics_via_ssh": true
+      "collect_disk_metrics_via_ssh": true,
+      "disk_device": "/dev/sdb"
     }
   ]
 }
@@ -97,7 +99,8 @@ streamlit run app/cluster_demo.py
 - `ssh_port`, `ssh_identity_file`, `ssh_extra_options` помогают стабилизировать SSH-подключение между разными дистрибутивами;
 - `ssh_legacy_algorithms=true` включает совместимость с устаревшими SSH-алгоритмами на старых хостах;
 - если `control_via_ssh=false`, кнопки stop/start/restart для узла не будут работать;
-- `collect_disk_metrics_via_ssh=true` включает сбор метрик диска из ОС через SSH (если `iostat` недоступен, метрики останутся пустыми).
+- `collect_disk_metrics_via_ssh=true` включает сбор метрик диска из ОС через SSH (если `iostat` недоступен, метрики останутся пустыми);
+- `disk_device` — имя блочного устройства для мониторинга (`/dev/sda`, `sdb`, `nvme0n1` и т.п.); если указано, в таблице `Cluster state` и на всех дисковых графиках будут использоваться только метрики этого устройства.
 
 ---
 
@@ -192,7 +195,7 @@ streamlit run app/cluster_demo.py
 ## Типичный сценарий проверки кластера
 
 1. Запустите приложение.
-2. Убедитесь, что узлы видны в таблице `Cluster state`.
+2. Убедитесь, что узлы видны в таблице `Cluster state`, и проверьте корректность `disk_device` для каждого узла (должен совпадать с именем устройства в `iostat -dx`).
 3. Запустите нагрузку (`▶ Start load`) и при необходимости меняйте `Количество клиентов`/`Потоков на клиента` прямо во время работы — генератор подстроится автоматически.
 4. Для остановки/запуска узла используйте одну кнопку состояния хоста:
    - `🟢 Хост запущен` — хост работает (клик остановит сервис);

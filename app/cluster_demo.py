@@ -46,6 +46,7 @@ class NodeConfig:
     ssh_legacy_algorithms: bool = False
     service_name: str = "postgrespro"
     collect_disk_metrics_via_ssh: bool = True
+    disk_device: str | None = None
 
 
 @dataclass
@@ -611,6 +612,14 @@ def fetch_disk_metrics_via_ssh(node: NodeConfig) -> dict[str, float | int | None
     device_rows = [line.split() for line in lines[header_idx + 1 :] if not line.startswith("avg-cpu")]
     if not device_rows:
         return default_metrics
+
+    if node.disk_device:
+        requested_device = node.disk_device.strip()
+        requested_aliases = {requested_device, requested_device.removeprefix("/dev/")}
+        filtered_rows = [row for row in device_rows if row and row[0] in requested_aliases]
+        if not filtered_rows:
+            return default_metrics
+        device_rows = filtered_rows
 
     totals = {
         "disk_read_kb_s_os": 0.0,

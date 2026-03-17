@@ -36,6 +36,7 @@ class NodeConfig:
     ssh_identity_file: str | None = None
     ssh_extra_options: list[str] | None = None
     ssh_legacy_algorithms: bool = False
+    disk_device: str | None = None
 
 
 @dataclass
@@ -224,26 +225,43 @@ def fetch_cpu_pct(node: NodeConfig) -> float | None:
 
 def fetch_disk_latency(node: NodeConfig) -> dict[str, float | None]:
     metrics = {"read_ms": None, "write_ms": None}
-    remote_cmd = (
-        "bash -lc \"iostat -dx 1 2 | "
-        "awk 'NF && $1 !~ /^(Device|Linux|avg-cpu:)/ {last=$0} END {print last}'\""
-    )
-    output = run_ssh_metric(node, remote_cmd)
+    output = run_ssh_metric(node, 'bash -lc "LC_ALL=C iostat -dx 1 2"')
     if output is not None:
-        parts = output.split()
-        if len(parts) >= 12:
-            try:
-                metrics["read_ms"] = float(parts[10])
-                metrics["write_ms"] = float(parts[11])
-                return metrics
-            except (ValueError, IndexError):
-                pass
+        sections = [section.strip() for section in output.split("\n\n") if section.strip() and "Device" in section]
+        if sections:
+            lines = [line.strip() for line in sections[-1].splitlines() if line.strip()]
+            header_idx = next((idx for idx, line in enumerate(lines) if line.startswith("Device")), None)
+            if header_idx is not None and header_idx + 1 < len(lines):
+                headers = lines[header_idx].split()
+                rows = [line.split() for line in lines[header_idx + 1 :] if not line.startswith("avg-cpu")]
+                if node.disk_device:
+                    aliases = {node.disk_device.strip(), node.disk_device.strip().removeprefix('/dev/')}
+                    rows = [row for row in rows if row and row[0] in aliases]
+                if rows:
+                    values_by_header = dict(zip(headers[1:], rows[0][1:]))
+                    read_value = values_by_header.get("r_await")
+                    write_value = values_by_header.get("w_await")
+                    try:
+                        metrics["read_ms"] = float(read_value) if read_value is not None else None
+                    except ValueError:
+                        metrics["read_ms"] = None
+                    try:
+                        metrics["write_ms"] = float(write_value) if write_value is not None else None
+                    except ValueError:
+                        metrics["write_ms"] = None
+                    if metrics["read_ms"] is not None or metrics["write_ms"] is not None:
+                        return metrics
+
+    device_filter = "$3 !~ /^(loop|ram|fd)/"
+    if node.disk_device:
+        disk_name = node.disk_device.strip().removeprefix('/dev/')
+        device_filter = f'$3 == "{disk_name}"'
 
     fallback_cmd = (
         "bash -lc \""
-        "awk '$3 !~ /^(loop|ram|fd)/ {r+=$4; rt+=$7; w+=$8; wt+=$11} END {print r,rt,w,wt}' /proc/diskstats; "
+        f"awk '{device_filter} {{r+=$4; rt+=$7; w+=$8; wt+=$11}} END {{print r,rt,w,wt}}' /proc/diskstats; "
         "sleep 1; "
-        "awk '$3 !~ /^(loop|ram|fd)/ {r+=$4; rt+=$7; w+=$8; wt+=$11} END {print r,rt,w,wt}' /proc/diskstats\""
+        f"awk '{device_filter} {{r+=$4; rt+=$7; w+=$8; wt+=$11}} END {{print r,rt,w,wt}}' /proc/diskstats\""
     )
     fallback_output = run_ssh_metric(node, fallback_cmd)
     if fallback_output is None:
