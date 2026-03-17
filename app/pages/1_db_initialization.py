@@ -27,11 +27,6 @@ if "db_init_state" not in st.session_state:
 state = st.session_state.db_init_state
 
 cfg_path = Path(st.text_input("Путь к конфигу (Path to config)", "config/cluster.json"))
-mode = st.selectbox(
-    "Режим нагрузки для выбора целевой БД",
-    options=["single-node", "dual-read", "master-rw-slave-r"],
-    index=0,
-)
 target_size_gb = st.number_input("Целевой размер БД, ГБ", min_value=0.1, max_value=500.0, value=1.0, step=0.1)
 
 try:
@@ -40,7 +35,7 @@ except Exception as exc:
     st.error(f"Не удалось прочитать конфиг: {exc}")
     st.stop()
 
-node = select_node_for_workload(cluster.nodes, mode, write_tx=True)
+node = select_node_for_workload(cluster.nodes, "single-node", write_tx=True)
 if not node:
     st.warning("В конфиге нет узлов")
     st.stop()
