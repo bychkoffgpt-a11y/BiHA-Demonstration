@@ -982,16 +982,15 @@ def render_controls(
     for idx, node in enumerate(cluster.nodes):
         with host_cols[idx]:
             is_running = node_statuses.get(node.name) == "up"
-            button_label = "⏹ Остановить хост" if is_running else "🔴 Хост остановлен"
+            button_label = "⏹ Остановить хост" if is_running else "▶️ Запустить хост"
+            action = "stop" if is_running else "start"
+            action_ru = "остановка" if is_running else "запуск"
 
             st.write(f"**{node.name}** ({node.role_hint})")
-            if is_running:
-                if st.button(button_label, key=f"failure-stop-{node.name}", use_container_width=True):
-                    ok, msg = run_node_action(node, "stop")
-                    st.toast(f"{node.name} остановка: {'OK' if ok else 'ERR'} | {msg}")
-                    st.rerun()
-            else:
-                st.button(button_label, key=f"failure-state-{node.name}", use_container_width=True, disabled=True)
+            if st.button(button_label, key=f"failure-toggle-{node.name}", use_container_width=True):
+                ok, msg = run_node_action(node, action)
+                st.toast(f"{node.name} {action_ru}: {'OK' if ok else 'ERR'} | {msg}")
+                st.rerun()
 
 
 def reset_server_stats(cluster: ClusterConfig) -> None:
