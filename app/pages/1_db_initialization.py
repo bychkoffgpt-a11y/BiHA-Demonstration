@@ -29,18 +29,22 @@ state = st.session_state.db_init_state
 cfg_path = Path(st.text_input("Путь к конфигу (Path to config)", "config/cluster.json"))
 target_size_gb = st.number_input("Целевой размер БД, ГБ", min_value=0.1, max_value=500.0, value=1.0, step=0.1)
 
+cluster = None
+node = None
+config_error: str | None = None
+
 try:
     cluster = load_cluster_config(cfg_path)
 except Exception as exc:
+    config_error = str(exc)
     st.error(f"Не удалось прочитать конфиг: {exc}")
-    st.stop()
 
-node = select_node_for_workload(cluster.nodes, "single-node", write_tx=True)
-if not node:
-    st.warning("В конфиге нет узлов")
-    st.stop()
-
-st.info(f"Целевая нода для инициализации: {node.name}")
+if cluster is not None:
+    node = select_node_for_workload(cluster.nodes, "single-node", write_tx=True)
+    if not node:
+        st.warning("В конфиге нет узлов")
+    else:
+        st.info(f"Целевая нода для инициализации: {node.name}")
 
 
 def run_init() -> None:
@@ -66,7 +70,8 @@ def run_init() -> None:
         state["running"] = False
 
 
-if st.button("Старт создания/наполнения БД", type="primary", disabled=state["running"]):
+can_start = config_error is None and node is not None and not state["running"]
+if st.button("Старт создания/наполнения БД", type="primary", disabled=not can_start):
     threading.Thread(target=run_init, daemon=True).start()
     st.rerun()
 
