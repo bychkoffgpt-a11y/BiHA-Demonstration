@@ -25,6 +25,7 @@ from workload_profiles import PgLikeSizing, estimate_pg_like_sizing, run_pg_like
 
 APP_TITLE = "BiHA PostgreSQL Cluster Demo"
 DEFAULT_HISTORY = 120
+DEFAULT_WORKLOAD_DB_SIZE_GB = 1.0
 MAX_WORKERS = 64
 METRICS_FETCH_WORKERS = 8
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
@@ -85,7 +86,7 @@ class WorkloadGenerator:
             return
         self._stop_event.clear()
         workers = max(1, min(MAX_WORKERS, sessions))
-        sizing = estimate_pg_like_sizing(float(st.session_state.get("target_size_gb", 0.1)))
+        sizing = estimate_pg_like_sizing(float(st.session_state.get("target_size_gb", DEFAULT_WORKLOAD_DB_SIZE_GB)))
         self._threads = []
         for _ in range(workers):
             thread = threading.Thread(
@@ -435,16 +436,8 @@ def render_sidebar() -> dict[str, Any]:
     )
     sessions = st.sidebar.slider("Клиентские сессии (Client sessions)", min_value=1, max_value=200, value=10, step=1)
     read_ratio = st.sidebar.slider("Доля чтения (Read ratio)", 0.0, 1.0, 0.7, 0.05)
-    target_size_gb = st.sidebar.number_input(
-        "Ожидаемый размер БД, ГБ (Expected DB size, GB)",
-        min_value=0.1,
-        max_value=500.0,
-        value=float(st.session_state.get("target_size_gb", 1.0)),
-        step=0.1,
-    )
     auto_refresh = st.sidebar.checkbox("Автообновление (Auto-refresh)", value=True)
     st.session_state.load_mode = mode
-    st.session_state.target_size_gb = float(target_size_gb)
     return {"mode": mode, "sessions": sessions, "read_ratio": read_ratio, "auto_refresh": auto_refresh}
 
 
@@ -621,8 +614,7 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
 
     recent_errors = wg.recent_errors_snapshot()
     if recent_errors:
-        st.caption("Последние ошибки генератора нагрузки (Recent load-generator errors)")
-        st.dataframe(pd.DataFrame(recent_errors), width="stretch", height=220)
+        st.caption("Подробные логи SQL-транзакций перенесены на страницу «SQL логи транзакций».")
 
     if "history" not in st.session_state:
         st.session_state.history = []
