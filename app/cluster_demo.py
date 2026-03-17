@@ -696,57 +696,39 @@ def apply_compact_top_styles() -> None:
 
 def render_controls(cluster: ClusterConfig, wg: WorkloadGenerator, profile: dict[str, Any]) -> None:
     st.subheader("Управление сценарием (Scenario controls)")
-    scenario_actions = {
-        "— Select action —": None,
-        "Start load": "start_load",
-        "Stop load": "stop_load",
-        "Reset counters": "reset_counters",
-        "Reset server stats": "reset_server_stats",
-        "Refresh now": "refresh_now",
-    }
-    selected_scenario_action = st.selectbox(
-        "Scenario action",
-        options=list(scenario_actions.keys()),
-        key="scenario_action_select",
-        label_visibility="collapsed",
-    )
-    scenario_action = scenario_actions[selected_scenario_action]
-    if scenario_action == "start_load":
+    scenario_cols = st.columns(5)
+
+    if scenario_cols[0].button("▶ Start load", use_container_width=True, key="scenario_start_load"):
         wg.start(cluster, profile["mode"], int(profile["sessions"]), float(profile["read_ratio"]))
-        st.session_state.scenario_action_select = "— Select action —"
         st.rerun()
-    if scenario_action == "stop_load":
+    if scenario_cols[1].button("⏹ Stop load", use_container_width=True, key="scenario_stop_load"):
         wg.stop()
-        st.session_state.scenario_action_select = "— Select action —"
         st.rerun()
-    if scenario_action == "reset_counters":
+    if scenario_cols[2].button("🔄 Reset counters", use_container_width=True, key="scenario_reset_counters"):
         wg.reset_stats()
-        st.session_state.scenario_action_select = "— Select action —"
         st.rerun()
-    if scenario_action == "reset_server_stats":
+    if scenario_cols[3].button("🧹 Reset server stats", use_container_width=True, key="scenario_reset_server_stats"):
         reset_server_stats(cluster)
-        st.session_state.scenario_action_select = "— Select action —"
         st.rerun()
-    if scenario_action == "refresh_now":
-        st.session_state.scenario_action_select = "— Select action —"
+    if scenario_cols[4].button("⟳ Refresh now", use_container_width=True, key="scenario_refresh_now"):
         st.rerun()
 
     st.markdown("#### Симуляция отказа (Failure simulation)")
 
     for node in cluster.nodes:
-        c1, c2 = st.columns([2, 3])
+        c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
         c1.write(f"**{node.name}** ({node.role_hint})")
-        node_select_key = f"failure-action-{node.name}"
-        selected_failure_action = c2.selectbox(
-            f"Failure action for {node.name}",
-            options=["— Select action —", "Stop", "Start", "Restart"],
-            key=node_select_key,
-            label_visibility="collapsed",
-        )
-        if selected_failure_action != "— Select action —":
-            ok, msg = run_node_action(node, selected_failure_action.lower())
-            st.toast(f"{node.name} {selected_failure_action.lower()}: {'OK' if ok else 'ERR'} | {msg}")
-            st.session_state[node_select_key] = "— Select action —"
+        if c2.button("Stop", key=f"failure-stop-{node.name}", use_container_width=True):
+            ok, msg = run_node_action(node, "stop")
+            st.toast(f"{node.name} stop: {'OK' if ok else 'ERR'} | {msg}")
+            st.rerun()
+        if c3.button("Start", key=f"failure-start-{node.name}", use_container_width=True):
+            ok, msg = run_node_action(node, "start")
+            st.toast(f"{node.name} start: {'OK' if ok else 'ERR'} | {msg}")
+            st.rerun()
+        if c4.button("Restart", key=f"failure-restart-{node.name}", use_container_width=True):
+            ok, msg = run_node_action(node, "restart")
+            st.toast(f"{node.name} restart: {'OK' if ok else 'ERR'} | {msg}")
             st.rerun()
 
 
