@@ -20,6 +20,7 @@ except ImportError:
     st_autorefresh = None
 
 from logging_utils import setup_file_logger
+from ui_styles import apply_base_page_styles
 
 LOGGER = setup_file_logger()
 
@@ -689,11 +690,8 @@ def schedule_ui_refresh(interval_ms: int, key: str) -> None:
 
 def render_dashboard() -> None:
     st.set_page_config(page_title="Экран производительности кластера", layout="wide")
-    st.title("Экран производительности кластера")
-    st.caption("Верхний ряд — результат нагрузки, нижний ряд — цена и устойчивость кластера.")
-    st.markdown(
+    apply_base_page_styles(
         """
-        <style>
         div[data-testid="stPopover"] button[kind="secondary"] {
             min-height: 1.75rem;
             height: 1.75rem;
@@ -702,10 +700,10 @@ def render_dashboard() -> None:
             font-size: 0.85rem;
             font-weight: 600;
         }
-        </style>
         """,
-        unsafe_allow_html=True,
     )
+    st.title("Экран производительности кластера")
+    st.caption("Верхний ряд — результат нагрузки, нижний ряд — цена и устойчивость кластера.")
 
     st.session_state.setdefault("cluster_dashboard_cfg_path", "config/cluster.json")
     st.session_state.setdefault("cluster_dashboard_target_db", "postgres")

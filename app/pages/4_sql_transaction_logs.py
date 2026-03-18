@@ -5,6 +5,8 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from ui_styles import apply_base_page_styles
+
 LOG_FILE = Path("logs/biha_demo.log")
 LOG_MARKER = "Workload transaction failed"
 
@@ -31,6 +33,7 @@ def sort_log_lines_desc(lines: tuple[str, ...]) -> list[str]:
 
 
 st.set_page_config(page_title="SQL логи транзакций", layout="wide")
+apply_base_page_styles()
 st.title("SQL логи транзакций")
 st.caption("Отдельная страница с ошибками SQL-транзакций генератора нагрузки.")
 

@@ -13,6 +13,7 @@ import pandas as pd
 import streamlit as st
 
 from logging_utils import setup_file_logger
+from ui_styles import apply_base_page_styles
 
 LOGGER = setup_file_logger()
 
@@ -195,6 +196,7 @@ def run_checks_for_nodes(cluster: ClusterConfig, selected_nodes: list[str], sele
 
 
 st.set_page_config(page_title="SSH доступ к узлам", layout="wide")
+apply_base_page_styles()
 st.title("Проверка SSH-доступа к узлам кластера")
 st.caption(
     "Страница для проверки, что приложение может подключаться по SSH и выполнять привилегированные команды "
