@@ -14,7 +14,6 @@ from urllib.parse import parse_qs, urlparse
 
 from zoneinfo import ZoneInfo
 
-import altair as alt
 import pandas as pd
 import psycopg
 from psycopg.conninfo import conninfo_to_dict
@@ -22,6 +21,7 @@ import streamlit as st
 
 from logging_utils import setup_file_logger
 from ui_styles import apply_base_page_styles
+from workload_status_store import write_workload_status
 from workload_profiles import PgLikeSizing, estimate_pg_like_sizing, run_pg_like_tx
 
 APP_TITLE = "BiHA PostgreSQL Cluster Demo"
@@ -80,6 +80,7 @@ class WorkloadGenerator:
         self._read_ratio: float = 0.7
         self._desired_workers: int = 1
         self._sizing: PgLikeSizing = estimate_pg_like_sizing(DEFAULT_WORKLOAD_DB_SIZE_GB)
+        self._last_status_flush_monotonic: float = 0.0
 
     @property
     def running(self) -> bool:
@@ -104,6 +105,7 @@ class WorkloadGenerator:
         if self.running:
             return
         self._stop_event.clear()
+        self._write_status(is_running=True)
 
         self._manager_thread = threading.Thread(target=self._manage_workers, daemon=True, name="workload-manager")
         self._manager_thread.start()
@@ -119,6 +121,13 @@ class WorkloadGenerator:
             self._read_ratio = read_ratio
             self._desired_workers = desired_workers
             self._sizing = estimate_pg_like_sizing(target_size_gb)
+        self._write_status(
+            is_running=self.running,
+            mode=mode,
+            clients=clients,
+            threads_per_client=threads_per_client,
+            read_ratio=read_ratio,
+        )
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -126,10 +135,15 @@ class WorkloadGenerator:
             self._manager_thread.join(timeout=2)
         self._manager_thread = None
         self._stop_all_workers()
+        self._write_status(is_running=False)
 
     def _manage_workers(self) -> None:
         while not self._stop_event.is_set():
             self._sync_workers()
+            now = time.monotonic()
+            if now - self._last_status_flush_monotonic >= 1.0:
+                self._write_status(is_running=True)
+                self._last_status_flush_monotonic = now
             self._stop_event.wait(0.2)
         self._stop_all_workers()
 
@@ -231,6 +245,35 @@ class WorkloadGenerator:
                     if len(self._recent_errors) > 20:
                         del self._recent_errors[:-20]
             time.sleep(0.001)
+
+    def _write_status(
+        self,
+        *,
+        is_running: bool,
+        mode: str | None = None,
+        clients: int | None = None,
+        threads_per_client: int | None = None,
+        read_ratio: float | None = None,
+    ) -> None:
+        with self._settings_lock:
+            current_mode = self._mode if mode is None else mode
+            desired_workers = self._desired_workers
+            current_read_ratio = self._read_ratio if read_ratio is None else read_ratio
+
+        payload: dict[str, Any] = {
+            "is_running": is_running,
+            "mode": current_mode,
+            "clients": clients,
+            "threads_per_client": threads_per_client,
+            "read_ratio": current_read_ratio,
+            "requested_threads": desired_workers,
+            "updated_at": pd.Timestamp.now(tz=MOSCOW_TZ).isoformat(),
+        }
+        if payload["clients"] is None:
+            payload.pop("clients")
+        if payload["threads_per_client"] is None:
+            payload.pop("threads_per_client")
+        write_workload_status(payload)
 
 
 class BackgroundMetricsCollector:
