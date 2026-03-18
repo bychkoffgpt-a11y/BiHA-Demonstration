@@ -51,8 +51,6 @@ if wg is not None:
         st.dataframe(recent_errors_df, width="stretch", height=320, hide_index=True)
     else:
         st.info("В текущем запуске ошибок SQL-транзакций пока нет.")
-else:
-    st.warning("Генератор нагрузки ещё не инициализирован. Сначала откройте страницу Cluster Demo.")
 
 st.subheader("Последние ошибки из файла логов")
 line_limit = st.slider("Количество строк", min_value=20, max_value=500, value=120, step=20)
