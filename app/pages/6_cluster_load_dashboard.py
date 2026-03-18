@@ -544,6 +544,13 @@ def theme_chart(chart: alt.Chart) -> alt.Chart:
 
 
 CHART_HEIGHT = 347
+MAX_WORKLOAD_THREADS = 64
+LOAD_MODE_LABELS = {
+    "r-master": "Чтение с master",
+    "rw-master": "Чтение/запись на master",
+    "r-master-r-slave": "Чтение с master и standby",
+    "rw-master-r-slave": "Запись на master, чтение с master и standby",
+}
 
 
 CHART_EXPLANATIONS = {
@@ -688,6 +695,80 @@ def schedule_ui_refresh(interval_ms: int, key: str) -> None:
     st.rerun()
 
 
+def get_workload_status_snapshot() -> dict[str, Any]:
+    workload_generator = st.session_state.get("workload_generator")
+    is_running = bool(getattr(workload_generator, "running", False))
+
+    mode = str(
+        st.session_state.get(
+            "load_mode",
+            st.session_state.get("persist_load_mode", "rw-master"),
+        )
+    )
+    clients = int(
+        st.session_state.get(
+            "load_clients",
+            st.session_state.get("persist_load_clients", 10),
+        )
+    )
+    threads_per_client = int(
+        st.session_state.get(
+            "load_threads_per_client",
+            st.session_state.get("persist_load_threads_per_client", 1),
+        )
+    )
+    requested_threads = clients * threads_per_client
+    total_threads = min(MAX_WORKLOAD_THREADS, requested_threads)
+    read_ratio = float(
+        st.session_state.get(
+            "load_read_ratio",
+            st.session_state.get("persist_load_read_ratio", 0.7),
+        )
+    )
+
+    if mode in {"r-master", "r-master-r-slave"}:
+        mode_details = "100% read"
+    else:
+        mode_details = f"read {read_ratio:.0%} / write {(1 - read_ratio):.0%}"
+
+    return {
+        "is_running": is_running,
+        "status_label": "РАБОТАЕТ" if is_running else "ОСТАНОВЛЕНА",
+        "status_class": "running" if is_running else "stopped",
+        "mode_label": LOAD_MODE_LABELS.get(mode, mode),
+        "mode_details": mode_details,
+        "threads_label": str(total_threads),
+        "threads_details": (
+            f"из запрошенных {requested_threads}" if requested_threads > MAX_WORKLOAD_THREADS else "активный профиль"
+        ),
+    }
+
+
+def render_workload_status_banner() -> None:
+    snapshot = get_workload_status_snapshot()
+    st.markdown(
+        f"""
+        <div class="workload-status-banner workload-status-banner--{snapshot["status_class"]}">
+            <div class="workload-status-banner__item">
+                <span class="workload-status-banner__label">Статус нагрузки</span>
+                <span class="workload-status-banner__value">{snapshot["status_label"]}</span>
+            </div>
+            <div class="workload-status-banner__item">
+                <span class="workload-status-banner__label">Потоков</span>
+                <span class="workload-status-banner__value">{snapshot["threads_label"]}</span>
+                <span class="workload-status-banner__hint">{snapshot["threads_details"]}</span>
+            </div>
+            <div class="workload-status-banner__item">
+                <span class="workload-status-banner__label">Режим нагрузки</span>
+                <span class="workload-status-banner__value">{snapshot["mode_label"]}</span>
+                <span class="workload-status-banner__hint">{snapshot["mode_details"]}</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_dashboard() -> None:
     st.set_page_config(page_title="Экран производительности кластера", layout="wide")
     apply_base_page_styles(
@@ -700,9 +781,57 @@ def render_dashboard() -> None:
             font-size: 0.85rem;
             font-weight: 600;
         }
+        .workload-status-banner {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 0.75rem;
+            padding: 0.95rem 1.1rem;
+            border-radius: 1rem;
+            border: 2px solid transparent;
+            background: #ffffff;
+            box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+            min-height: 100%;
+        }
+        .workload-status-banner--running {
+            border-color: #22c55e;
+            background: linear-gradient(180deg, #f0fdf4 0%, #ffffff 100%);
+        }
+        .workload-status-banner--stopped {
+            border-color: #ef4444;
+            background: linear-gradient(180deg, #fef2f2 0%, #ffffff 100%);
+        }
+        .workload-status-banner__item {
+            display: flex;
+            flex-direction: column;
+            gap: 0.2rem;
+            min-width: 0;
+        }
+        .workload-status-banner__label {
+            font-size: 0.82rem;
+            color: #475569;
+        }
+        .workload-status-banner__value {
+            font-size: 1.08rem;
+            font-weight: 700;
+            color: #0f172a;
+            line-height: 1.25;
+        }
+        .workload-status-banner__hint {
+            font-size: 0.78rem;
+            color: #64748b;
+        }
+        @media (max-width: 1200px) {
+            .workload-status-banner {
+                grid-template-columns: 1fr;
+            }
+        }
         """,
     )
-    st.title("Экран производительности кластера")
+    title_col, status_col = st.columns([1.45, 1.55], vertical_alignment="center")
+    with title_col:
+        st.title("Экран производительности кластера")
+    with status_col:
+        render_workload_status_banner()
 
     st.session_state.setdefault("cluster_dashboard_cfg_path", "config/cluster.json")
     st.session_state.setdefault("cluster_dashboard_target_db", "postgres")
