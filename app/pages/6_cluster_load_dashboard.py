@@ -21,6 +21,7 @@ except ImportError:
 
 from logging_utils import setup_file_logger
 from ui_styles import apply_base_page_styles
+from workload_status_store import read_workload_status
 
 LOGGER = setup_file_logger()
 
@@ -696,33 +697,48 @@ def schedule_ui_refresh(interval_ms: int, key: str) -> None:
 
 
 def get_workload_status_snapshot() -> dict[str, Any]:
+    persisted_status = read_workload_status()
     workload_generator = st.session_state.get("workload_generator")
-    is_running = bool(getattr(workload_generator, "running", False))
+    is_running = bool(persisted_status.get("is_running"))
+    if not is_running and workload_generator is not None:
+        is_running = bool(getattr(workload_generator, "running", False))
 
     mode = str(
-        st.session_state.get(
-            "load_mode",
-            st.session_state.get("persist_load_mode", "rw-master"),
+        persisted_status.get(
+            "mode",
+            st.session_state.get(
+                "load_mode",
+                st.session_state.get("persist_load_mode", "rw-master"),
+            ),
         )
     )
     clients = int(
-        st.session_state.get(
-            "load_clients",
-            st.session_state.get("persist_load_clients", 10),
+        persisted_status.get(
+            "clients",
+            st.session_state.get(
+                "load_clients",
+                st.session_state.get("persist_load_clients", 10),
+            ),
         )
     )
     threads_per_client = int(
-        st.session_state.get(
-            "load_threads_per_client",
-            st.session_state.get("persist_load_threads_per_client", 1),
+        persisted_status.get(
+            "threads_per_client",
+            st.session_state.get(
+                "load_threads_per_client",
+                st.session_state.get("persist_load_threads_per_client", 1),
+            ),
         )
     )
-    requested_threads = clients * threads_per_client
+    requested_threads = int(persisted_status.get("requested_threads", clients * threads_per_client))
     total_threads = min(MAX_WORKLOAD_THREADS, requested_threads)
     read_ratio = float(
-        st.session_state.get(
-            "load_read_ratio",
-            st.session_state.get("persist_load_read_ratio", 0.7),
+        persisted_status.get(
+            "read_ratio",
+            st.session_state.get(
+                "load_read_ratio",
+                st.session_state.get("persist_load_read_ratio", 0.7),
+            ),
         )
     )
 
@@ -827,12 +843,6 @@ def render_dashboard() -> None:
         }
         """,
     )
-    title_col, status_col = st.columns([1.45, 1.55], vertical_alignment="center")
-    with title_col:
-        st.title("Экран производительности кластера")
-    with status_col:
-        render_workload_status_banner()
-
     st.session_state.setdefault("cluster_dashboard_cfg_path", "config/cluster.json")
     st.session_state.setdefault("cluster_dashboard_target_db", "postgres")
     st.session_state.setdefault("cluster_dashboard_auto_refresh", True)
@@ -879,11 +889,18 @@ def render_dashboard() -> None:
 
     if auto_refresh:
         collector.start(lambda: fetch_snapshot(primary, standby, target_db))
+    def render_live_dashboard_section() -> None:
+        title_col, status_col = st.columns([1.45, 1.55], vertical_alignment="center")
+        with title_col:
+            st.title("Экран производительности кластера")
+        with status_col:
+            render_workload_status_banner()
 
-    series = build_timeseries(collector.history(), window_minutes)
-    if not series:
-        st.info("Соберите минимум два среза метрик для отображения графиков.")
-    else:
+        series = build_timeseries(collector.history(), window_minutes)
+        if not series:
+            st.info("Соберите минимум два среза метрик для отображения графиков.")
+            return
+
         def render_sessions_chart() -> None:
             sessions_df = series["sessions"].dropna(subset=["value"])
             if sessions_df.empty:
@@ -902,27 +919,27 @@ def render_dashboard() -> None:
                 )
                 st.altair_chart(theme_chart(chart), width="stretch")
             render_chart_help("sessions")
-    
+
         def render_tps_chart() -> None:
             line_chart(series["tps"], "metric", "транзакции/с", "TPS (транзакции/с)", alt.Scale(zero=True))
             render_chart_help("tps")
-    
+
         def render_latency_chart() -> None:
             line_chart(series["latency"], "metric", "мс", "Latency p95 (мс)", alt.Scale(zero=True))
             render_chart_help("latency")
-    
+
         def render_cpu_chart() -> None:
             line_chart(series["cpu"], "node", "%", "CPU primary / standby (%)", alt.Scale(domain=[0, 100]))
             render_chart_help("cpu")
-    
+
         def render_disk_chart() -> None:
             line_chart(series["disk"], "metric", "мс", "Disk latency (Primary, мс)", alt.Scale(zero=True))
             render_chart_help("disk")
-    
+
         def render_wal_chart() -> None:
             line_chart(series["wal"], "metric", "МБ/с", "WAL generation rate (MB/s)", alt.Scale(zero=True))
             render_chart_help("wal")
-    
+
         charts: list[Callable[[], None]] = [
             render_tps_chart,
             render_latency_chart,
@@ -932,24 +949,25 @@ def render_dashboard() -> None:
             render_wal_chart,
         ]
 
-        charts_container = st.empty()
-        with charts_container.container():
-            if compact_grid:
-                for idx in range(0, len(charts), 2):
-                    row_cols = st.columns(2)
-                    for col, chart_renderer in zip(row_cols, charts[idx : idx + 2], strict=False):
-                        with col:
-                            chart_renderer()
-            else:
-                first_row = st.columns(4)
-                for col, chart_renderer in zip(first_row, charts[:4], strict=True):
+        if compact_grid:
+            for idx in range(0, len(charts), 2):
+                row_cols = st.columns(2)
+                for col, chart_renderer in zip(row_cols, charts[idx : idx + 2], strict=False):
                     with col:
                         chart_renderer()
+        else:
+            first_row = st.columns(4)
+            for col, chart_renderer in zip(first_row, charts[:4], strict=True):
+                with col:
+                    chart_renderer()
 
-                second_row = st.columns(2)
-                for col, chart_renderer in zip(second_row, charts[4:], strict=True):
-                    with col:
-                        chart_renderer()
+            second_row = st.columns(2)
+            for col, chart_renderer in zip(second_row, charts[4:], strict=True):
+                with col:
+                    chart_renderer()
+
+    live_dashboard_fragment = st.fragment(render_live_dashboard_section, run_every=1 if auto_refresh else None)
+    live_dashboard_fragment()
 
     st.divider()
 
@@ -977,8 +995,7 @@ def render_dashboard() -> None:
     source_col2.text_input("Рабочая БД для TPS", key="cluster_dashboard_target_db")
 
     if auto_refresh:
-        st.caption("Сбор метрик выполняется в фоновом потоке. Интерфейс обновляется отдельно.")
-        schedule_ui_refresh(interval_ms=1000, key=f"cluster-load-refresh-{session_key}")
+        st.caption("Сбор метрик выполняется в фоновом потоке. Графики и статус обновляются асинхронно без полной перерисовки страницы.")
     else:
         collector.stop()
 
