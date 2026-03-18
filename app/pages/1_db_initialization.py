@@ -8,9 +8,11 @@ from pathlib import Path
 import streamlit as st
 
 from cluster_demo import load_cluster_config, select_node_for_workload
+from ui_styles import apply_base_page_styles
 from workload_profiles import initialize_pg_like_dataset
 
 st.set_page_config(page_title="Инициализация БД", layout="wide")
+apply_base_page_styles()
 st.title("Инициализация и наполнение БД (pgbench-like)")
 st.caption("Создание схемы и генерация данных по целевому размеру БД в ГБ.")
 

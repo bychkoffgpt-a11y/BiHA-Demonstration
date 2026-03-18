@@ -1,5 +1,6 @@
 import streamlit as st
 
+from ui_styles import apply_base_page_styles
 from workload_profiles import (
     PG_LIKE_FILL_ACCOUNTS_SQL,
     PG_LIKE_FILL_BRANCHES_SQL,
@@ -16,6 +17,7 @@ from workload_profiles import (
 )
 
 st.set_page_config(page_title="SQL команды нагрузки", layout="wide")
+apply_base_page_styles()
 st.title("SQL команды инициализации и нагрузки")
 st.caption("Все SQL-скрипты, используемые приложением для подготовки базы и генерации нагрузки.")
 st.info(

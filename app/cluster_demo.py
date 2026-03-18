@@ -21,6 +21,7 @@ from psycopg.conninfo import conninfo_to_dict
 import streamlit as st
 
 from logging_utils import setup_file_logger
+from ui_styles import apply_base_page_styles
 from workload_profiles import PgLikeSizing, estimate_pg_like_sizing, run_pg_like_tx
 
 APP_TITLE = "BiHA PostgreSQL Cluster Demo"
@@ -990,131 +991,123 @@ def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, A
 
 
 def apply_compact_top_styles() -> None:
-    st.markdown(
+    apply_base_page_styles(
         """
-        <style>
-            div.block-container {
-                padding-top: 1.2rem;
-                padding-bottom: 0.6rem;
-            }
+        h1 {
+            font-size: 2.05rem !important;
+            line-height: 1.2 !important;
+            margin-bottom: 0.2rem !important;
+        }
 
-            h1 {
-                font-size: 2.05rem !important;
-                line-height: 1.2 !important;
-                margin-bottom: 0.2rem !important;
-            }
+        h3 {
+            font-size: 1.35rem !important;
+            margin-top: 0.45rem !important;
+            margin-bottom: 0.2rem !important;
+        }
 
-            h3 {
-                font-size: 1.35rem !important;
-                margin-top: 0.45rem !important;
-                margin-bottom: 0.2rem !important;
-            }
+        .stCaption {
+            font-size: 0.84rem !important;
+            margin-bottom: 0.1rem !important;
+        }
 
-            .stCaption {
-                font-size: 0.84rem !important;
-                margin-bottom: 0.1rem !important;
-            }
+        div[data-testid="stHorizontalBlock"] {
+            gap: 0.5rem !important;
+        }
 
-            div[data-testid="stHorizontalBlock"] {
-                gap: 0.5rem !important;
-            }
+        div[data-testid="stMetricValue"] {
+            font-size: 1.25rem !important;
+        }
 
-            div[data-testid="stMetricValue"] {
-                font-size: 1.25rem !important;
-            }
+        div[data-testid="stMetricLabel"] {
+            font-size: 0.8rem !important;
+        }
 
-            div[data-testid="stMetricLabel"] {
-                font-size: 0.8rem !important;
-            }
+        div[data-testid="stMetricDelta"] {
+            font-size: 0.75rem !important;
+        }
 
-            div[data-testid="stMetricDelta"] {
-                font-size: 0.75rem !important;
-            }
+        div[data-testid="stTextInput"] label p,
+        div[data-testid="stSlider"] label p,
+        div[data-testid="stSelectbox"] label p,
+        div[data-testid="stCheckbox"] label p {
+            font-size: 0.92rem !important;
+        }
 
-            div[data-testid="stTextInput"] label p,
-            div[data-testid="stSlider"] label p,
-            div[data-testid="stSelectbox"] label p,
-            div[data-testid="stCheckbox"] label p {
-                font-size: 0.92rem !important;
-            }
+        div[data-testid="stTextInput"] input {
+            font-size: 0.95rem !important;
+            padding-top: 0.35rem !important;
+            padding-bottom: 0.35rem !important;
+        }
 
-            div[data-testid="stTextInput"] input {
-                font-size: 0.95rem !important;
-                padding-top: 0.35rem !important;
-                padding-bottom: 0.35rem !important;
-            }
+        div[data-testid="stButton"] button {
+            font-size: 0.76rem !important;
+            min-height: 1.35rem !important;
+            padding: 0.05rem 0.35rem !important;
+            line-height: 1.15 !important;
+        }
 
-            div[data-testid="stButton"] button {
-                font-size: 0.76rem !important;
-                min-height: 1.35rem !important;
-                padding: 0.05rem 0.35rem !important;
-                line-height: 1.15 !important;
-            }
+        section[data-testid="stSidebar"] div[data-testid="stSidebarUserContent"] {
+            padding-top: 0.75rem !important;
+        }
 
-            section[data-testid="stSidebar"] div[data-testid="stSidebarUserContent"] {
-                padding-top: 0.75rem !important;
-            }
+        section[data-testid="stSidebar"] h2 {
+            font-size: 1.85rem !important;
+        }
 
-            section[data-testid="stSidebar"] h2 {
-                font-size: 1.85rem !important;
-            }
+        section[data-testid="stSidebar"] h3 {
+            font-size: 1.16rem !important;
+            margin-top: 0.35rem !important;
+            margin-bottom: 0.15rem !important;
+        }
 
-            section[data-testid="stSidebar"] h3 {
-                font-size: 1.16rem !important;
-                margin-top: 0.35rem !important;
-                margin-bottom: 0.15rem !important;
-            }
+        section[data-testid="stSidebar"] hr {
+            margin-top: 0.75rem !important;
+            margin-bottom: 0.75rem !important;
+        }
 
-            section[data-testid="stSidebar"] hr {
-                margin-top: 0.75rem !important;
-                margin-bottom: 0.75rem !important;
-            }
+        section[data-testid="stSidebar"] div[data-testid="stSelectbox"] label p,
+        section[data-testid="stSidebar"] div[data-testid="stSlider"] label p,
+        section[data-testid="stSidebar"] div[data-testid="stNumberInput"] label p,
+        section[data-testid="stSidebar"] div[data-testid="stCheckbox"] label p {
+            font-size: 0.86rem !important;
+            line-height: 1.1 !important;
+        }
 
-            section[data-testid="stSidebar"] div[data-testid="stSelectbox"] label p,
-            section[data-testid="stSidebar"] div[data-testid="stSlider"] label p,
-            section[data-testid="stSidebar"] div[data-testid="stNumberInput"] label p,
-            section[data-testid="stSidebar"] div[data-testid="stCheckbox"] label p {
-                font-size: 0.86rem !important;
-                line-height: 1.1 !important;
-            }
+        section[data-testid="stSidebar"] div[data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+        section[data-testid="stSidebar"] div[data-testid="stNumberInput"] input,
+        section[data-testid="stSidebar"] div[data-testid="stTextInput"] input {
+            min-height: 2.15rem !important;
+            padding-top: 0.2rem !important;
+            padding-bottom: 0.2rem !important;
+        }
 
-            section[data-testid="stSidebar"] div[data-testid="stSelectbox"] div[data-baseweb="select"] > div,
-            section[data-testid="stSidebar"] div[data-testid="stNumberInput"] input,
-            section[data-testid="stSidebar"] div[data-testid="stTextInput"] input {
-                min-height: 2.15rem !important;
-                padding-top: 0.2rem !important;
-                padding-bottom: 0.2rem !important;
-            }
+        section[data-testid="stSidebar"] div[data-testid="stButton"] button {
+            min-height: 1.85rem !important;
+            padding-top: 0.1rem !important;
+            padding-bottom: 0.1rem !important;
+            font-size: 0.95rem !important;
+        }
 
-            section[data-testid="stSidebar"] div[data-testid="stButton"] button {
-                min-height: 1.85rem !important;
-                padding-top: 0.1rem !important;
-                padding-bottom: 0.1rem !important;
-                font-size: 0.95rem !important;
-            }
+        section[data-testid="stSidebar"] div[data-testid="stButton"]:first-of-type button[kind="primary"] {
+            background-color: #16a34a !important;
+            border-color: #16a34a !important;
+            color: #ffffff !important;
+        }
 
-            section[data-testid="stSidebar"] div[data-testid="stButton"]:first-of-type button[kind="primary"] {
-                background-color: #16a34a !important;
-                border-color: #16a34a !important;
-                color: #ffffff !important;
-            }
+        section[data-testid="stSidebar"] div[data-testid="stButton"]:first-of-type button[kind="secondary"] {
+            background-color: #dc2626 !important;
+            border-color: #dc2626 !important;
+            color: #ffffff !important;
+        }
 
-            section[data-testid="stSidebar"] div[data-testid="stButton"]:first-of-type button[kind="secondary"] {
-                background-color: #dc2626 !important;
-                border-color: #dc2626 !important;
-                color: #ffffff !important;
-            }
+        section[data-testid="stSidebar"] div[data-testid="stButton"]:first-of-type button:hover {
+            filter: brightness(0.95) !important;
+        }
 
-            section[data-testid="stSidebar"] div[data-testid="stButton"]:first-of-type button:hover {
-                filter: brightness(0.95) !important;
-            }
-
-            section[data-testid="stSidebar"] div[data-testid="stSlider"] {
-                margin-bottom: 0.15rem !important;
-            }
-        </style>
+        section[data-testid="stSidebar"] div[data-testid="stSlider"] {
+            margin-bottom: 0.15rem !important;
+        }
         """,
-        unsafe_allow_html=True,
     )
 
 
