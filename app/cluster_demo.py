@@ -787,7 +787,94 @@ def run_node_action(node: NodeConfig, action: str) -> tuple[bool, str]:
     return ok, output or "OK"
 
 
-def render_sidebar() -> dict[str, Any]:
+def open_reset_counters_dialog(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
+    if not hasattr(st, "dialog"):
+        if st.session_state.get("confirm_reset_counters_inline", False):
+            with st.sidebar.container(border=True):
+                st.warning(
+                    "Подтвердите сброс серверной статистики на всех узлах кластера. "
+                    "Будут предприняты попытки очистки счётчиков pg_stat_database и связанных shared статистик."
+                )
+                confirm_cols = st.columns(2)
+                if confirm_cols[0].button("✅ Да, сбросить", key="confirm_reset_yes", use_container_width=True):
+                    wg.reset_stats()
+                    reset_server_stats(cluster)
+                    st.session_state["confirm_reset_counters_inline"] = False
+                    st.rerun()
+                if confirm_cols[1].button("❌ Отмена", key="confirm_reset_no", use_container_width=True):
+                    st.session_state["confirm_reset_counters_inline"] = False
+                    st.rerun()
+        return
+
+    @st.dialog("Сбросить счётчики?")
+    def _dialog() -> None:
+        st.warning(
+            "Будут сброшены серверные счётчики на всех узлах кластера, "
+            "включая статистику pg_stat_database и shared statistics."
+        )
+        confirm_cols = st.columns(2)
+        if confirm_cols[0].button("✅ Да, сбросить", key="confirm_reset_yes_dialog", use_container_width=True):
+            wg.reset_stats()
+            reset_server_stats(cluster)
+            st.rerun()
+        if confirm_cols[1].button("❌ Отмена", key="confirm_reset_no_dialog", use_container_width=True):
+            st.rerun()
+
+    _dialog()
+
+
+def open_reset_caches_dialog(cluster: ClusterConfig) -> None:
+    if not hasattr(st, "dialog"):
+        if st.session_state.get("confirm_reset_caches_inline", False):
+            with st.sidebar.container(border=True):
+                st.warning(
+                    "Подтвердите очистку page cache/dentries/inodes на всех нодах кластера. "
+                    "Операция требует sudo без пароля и может временно ухудшить производительность."
+                )
+                confirm_cols = st.columns(2)
+                if confirm_cols[0].button("✅ Да, очистить кэши", key="confirm_reset_caches_yes", use_container_width=True):
+                    reset_all_node_caches(cluster)
+                    st.session_state["confirm_reset_caches_inline"] = False
+                    st.rerun()
+                if confirm_cols[1].button("❌ Отмена", key="confirm_reset_caches_no", use_container_width=True):
+                    st.session_state["confirm_reset_caches_inline"] = False
+                    st.rerun()
+        return
+
+    @st.dialog("Очистить кэши?")
+    def _dialog() -> None:
+        st.warning(
+            "Будет выполнена очистка page cache/dentries/inodes на всех нодах кластера. "
+            "Операция требует sudo без пароля и может временно ухудшить производительность."
+        )
+        confirm_cols = st.columns(2)
+        if confirm_cols[0].button("✅ Да, очистить кэши", key="confirm_reset_caches_yes_dialog", use_container_width=True):
+            reset_all_node_caches(cluster)
+            st.rerun()
+        if confirm_cols[1].button("❌ Отмена", key="confirm_reset_caches_no_dialog", use_container_width=True):
+            st.rerun()
+
+    _dialog()
+
+
+def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, Any]:
+    st.sidebar.header("Управление нагрузкой")
+    st.sidebar.info(f"Статус генератора: {'🟢 РАБОТАЕТ' if wg.running else '🔴 ОСТАНОВЛЕН'}")
+    toggle_label = "⏹ Остановить нагрузку" if wg.running else "▶️ Запустить нагрузку"
+    if st.sidebar.button(toggle_label, key="sidebar_toggle_load", use_container_width=True, type="primary"):
+        if wg.running:
+            wg.stop()
+        else:
+            wg.start(
+                cluster,
+                st.session_state.get("load_mode", "rw-master"),
+                int(st.session_state.get("load_clients", 1)),
+                int(st.session_state.get("load_threads_per_client", 1)),
+                float(st.session_state.get("load_read_ratio", 0.7)),
+            )
+        st.rerun()
+
+    st.sidebar.divider()
     st.sidebar.header("Профиль нагрузки (Load profile)")
 
     legacy_mode_mapping = {
@@ -872,6 +959,26 @@ def render_sidebar() -> dict[str, Any]:
     st.session_state.persist_load_read_ratio = read_ratio
     st.session_state.persist_load_auto_refresh = auto_refresh
 
+    st.sidebar.divider()
+    st.sidebar.markdown("#### Сервисные операции")
+    if st.sidebar.button("🔄 Сбросить счётчики", use_container_width=True, key="sidebar_reset_counters"):
+        if hasattr(st, "dialog"):
+            open_reset_counters_dialog(cluster, wg)
+        else:
+            st.session_state["confirm_reset_counters_inline"] = True
+            st.rerun()
+    if st.sidebar.button("🧹 Сбросить кэши", use_container_width=True, key="sidebar_reset_caches"):
+        if hasattr(st, "dialog"):
+            open_reset_caches_dialog(cluster)
+        else:
+            st.session_state["confirm_reset_caches_inline"] = True
+            st.rerun()
+
+    if st.session_state.get("confirm_reset_counters_inline", False):
+        open_reset_counters_dialog(cluster, wg)
+    if st.session_state.get("confirm_reset_caches_inline", False):
+        open_reset_caches_dialog(cluster)
+
     return {
         "mode": mode,
         "clients": int(clients),
@@ -949,50 +1056,7 @@ def apply_compact_top_styles() -> None:
     )
 
 
-def render_controls(
-    cluster: ClusterConfig,
-    wg: WorkloadGenerator,
-    profile: dict[str, Any],
-    collector: BackgroundMetricsCollector,
-) -> None:
-    st.subheader("Управление сценарием (Scenario controls)")
-    actions_col1, actions_col2 = st.columns(2)
-    if actions_col1.button("🔄 Reset counters", use_container_width=True, key="scenario_reset_counters"):
-        st.session_state["confirm_reset_counters"] = True
-    if actions_col2.button("🧹 Reset all caches", use_container_width=True, key="scenario_reset_caches"):
-        st.session_state["confirm_reset_caches"] = True
-
-    if st.session_state.get("confirm_reset_counters", False):
-        with st.container(border=True):
-            st.warning(
-                "Подтвердите сброс серверной статистики на всех узлах кластера. "
-                "Будут предприняты попытки очистки счётчиков pg_stat_database и связанных shared статистик."
-            )
-            confirm_cols = st.columns(2)
-            if confirm_cols[0].button("✅ Да, сбросить", key="confirm_reset_yes", use_container_width=True):
-                wg.reset_stats()
-                reset_server_stats(cluster)
-                st.session_state["confirm_reset_counters"] = False
-                st.rerun()
-            if confirm_cols[1].button("❌ Отмена", key="confirm_reset_no", use_container_width=True):
-                st.session_state["confirm_reset_counters"] = False
-                st.rerun()
-
-    if st.session_state.get("confirm_reset_caches", False):
-        with st.container(border=True):
-            st.warning(
-                "Подтвердите очистку page cache/dentries/inodes на всех нодах кластера. "
-                "Операция требует sudo без пароля и может временно ухудшить производительность."
-            )
-            confirm_cols = st.columns(2)
-            if confirm_cols[0].button("✅ Да, очистить кэши", key="confirm_reset_caches_yes", use_container_width=True):
-                reset_all_node_caches(cluster)
-                st.session_state["confirm_reset_caches"] = False
-                st.rerun()
-            if confirm_cols[1].button("❌ Отмена", key="confirm_reset_caches_no", use_container_width=True):
-                st.session_state["confirm_reset_caches"] = False
-                st.rerun()
-
+def render_controls(cluster: ClusterConfig, collector: BackgroundMetricsCollector) -> None:
     st.markdown("#### Управление хостами (Host controls)")
 
     snapshot_rows = collector.snapshot().get("rows", [])
@@ -1174,23 +1238,7 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: Bac
             {row.get("node"): row.get("error") for row in rows},
         )
         st.warning("Нет подключений к узлам БД. Проверьте доступность PostgreSQL и параметры DSN/SSH в конфиге.")
-    status_cols = st.columns([4.6, 1.4])
-    with status_cols[0]:
-        st.info(f"Статус генератора нагрузки (Load generator status): {'🟢 РАБОТАЕТ' if wg.running else '🔴 ОСТАНОВЛЕН'}")
-    with status_cols[1]:
-        toggle_label = "🟢 Stop load" if wg.running else "🔴 Start load"
-        if st.button(toggle_label, key="status_toggle_load", use_container_width=True):
-            if wg.running:
-                wg.stop()
-            else:
-                wg.start(
-                    cluster,
-                    st.session_state.get("load_mode", "rw-master"),
-                    int(st.session_state.get("load_clients", 1)),
-                    int(st.session_state.get("load_threads_per_client", 1)),
-                    float(st.session_state.get("load_read_ratio", 0.7)),
-                )
-            st.rerun()
+    st.info(f"Статус генератора нагрузки (Load generator status): {'🟢 РАБОТАЕТ' if wg.running else '🔴 ОСТАНОВЛЕН'}")
     clients = int(st.session_state.get("load_clients", 1))
     threads_per_client = int(st.session_state.get("load_threads_per_client", 1))
     requested_workers = clients * threads_per_client
@@ -1275,7 +1323,6 @@ def main() -> None:
         if st.button("⟳", key="scenario_refresh_now", help="Refresh now"):
             st.rerun()
     st.title(APP_TITLE)
-    st.caption("Демо-интерфейс для проверки кластера BiHA PostgreSQL Pro (Demo GUI for BiHA PostgreSQL Pro cluster validation)")
 
     st.session_state.setdefault("cfg_path", "config/cluster.json")
     raw_cfg_path = str(st.session_state["cfg_path"]).strip()
@@ -1307,7 +1354,7 @@ def main() -> None:
 
     wg: WorkloadGenerator = st.session_state.workload_generator
     collector: BackgroundMetricsCollector = st.session_state.metrics_collector
-    profile = render_sidebar()
+    profile = render_sidebar(cluster, wg)
 
     wg.update_settings(
         cluster,
@@ -1323,7 +1370,7 @@ def main() -> None:
     else:
         collector.set_mode(profile["mode"])
 
-    render_controls(cluster, wg, profile, collector)
+    render_controls(cluster, collector)
     render_metrics(cluster, wg, collector)
 
     st.divider()
