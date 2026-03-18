@@ -5,14 +5,8 @@ import streamlit as st
 _BASE_PAGE_CSS = """
 <style>
     header[data-testid="stHeader"] {
-        height: 0 !important;
-        min-height: 0 !important;
         background: transparent !important;
         border-bottom: none !important;
-    }
-
-    div[data-testid="stToolbar"] {
-        display: none !important;
     }
 
     div[data-testid="stDecoration"] {
