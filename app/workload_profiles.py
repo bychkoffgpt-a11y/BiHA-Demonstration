@@ -10,6 +10,8 @@ from typing import Callable
 
 import psycopg
 
+WRITE_AUXILIARY_EVERY = 4
+
 PG_LIKE_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS pgbench_accounts (
     aid INTEGER PRIMARY KEY,
@@ -133,35 +135,42 @@ PG_LIKE_READ_SQL = ";\n\n".join(PG_LIKE_READ_SQL_STMTS) + ";"
 
 PG_LIKE_WRITE_SCRIPT_SQL = r"""
 \set bid random(1, :scale)
-\set tid random(1, :scale * 10)
-\set aid_from random(1, :scale * 100000 - 1000)
-\set aid_to :aid_from + 1000
-\set aid_upd_from random(1, :scale * 100000 - 100)
-\set aid_upd_to :aid_upd_from + 100
+\set tid ((:bid - 1) * 10) + random(1, 10)
+\set aid ((:bid - 1) * 100000) + random(1, 100000)
 \set delta random(-1000, 1000)
 
 BEGIN;
 
-SELECT sum(abalance)
+-- Базовая часть: выполняется в каждой write-транзакции.
+SELECT abalance
 FROM pgbench_accounts
-WHERE aid BETWEEN :aid_from AND :aid_to;
+WHERE aid = :aid;
 
 UPDATE pgbench_accounts
 SET abalance = abalance + :delta
-WHERE aid BETWEEN :aid_upd_from AND :aid_upd_to;
+WHERE aid = :aid;
+
+COMMIT;
+""".strip()
+
+PG_LIKE_WRITE_AUXILIARY_SCRIPT_SQL = rf"""
+\set bid random(1, :scale)
+\set tid ((:bid - 1) * 10) + random(1, 10)
+\set aid ((:bid - 1) * 100000) + random(1, 100000)
+\set delta random(-1000, 1000)
+
+BEGIN;
+
+-- Дополнительная часть: приложение выполняет этот блок примерно
+-- в каждой {WRITE_AUXILIARY_EVERY}-й write-транзакции, чтобы уменьшить
+-- конкуренцию за блокировки на общих строках.
 
 UPDATE pgbench_tellers
 SET tbalance = tbalance + :delta
-WHERE bid = :bid;
-
-UPDATE pgbench_branches
-SET bbalance = bbalance + :delta
-WHERE bid = :bid;
+WHERE tid = :tid;
 
 INSERT INTO pgbench_history (tid, bid, aid, delta, mtime)
-SELECT :tid, :bid, aid, :delta, clock_timestamp()
-FROM pgbench_accounts
-WHERE aid BETWEEN :aid_upd_from AND :aid_upd_to;
+VALUES (:tid, :bid, :aid, :delta, clock_timestamp());
 
 SELECT count(*), sum(delta)
 FROM pgbench_history
@@ -170,32 +179,28 @@ WHERE bid = :bid;
 COMMIT;
 """.strip()
 
-PG_LIKE_WRITE_SQL_STMTS = (
+PG_LIKE_WRITE_PRIMARY_SQL_STMTS = (
     """
-SELECT sum(abalance)
+SELECT abalance
 FROM pgbench_accounts
-WHERE aid BETWEEN %(aid_from)s AND %(aid_to)s
+WHERE aid = %(aid)s
 """.strip(),
     """
 UPDATE pgbench_accounts
 SET abalance = abalance + %(delta)s
-WHERE aid BETWEEN %(aid_upd_from)s AND %(aid_upd_to)s
+WHERE aid = %(aid)s
 """.strip(),
+)
+
+PG_LIKE_WRITE_AUXILIARY_SQL_STMTS = (
     """
 UPDATE pgbench_tellers
 SET tbalance = tbalance + %(delta)s
-WHERE bid = %(bid)s
-""".strip(),
-    """
-UPDATE pgbench_branches
-SET bbalance = bbalance + %(delta)s
-WHERE bid = %(bid)s
+WHERE tid = %(tid)s
 """.strip(),
     """
 INSERT INTO pgbench_history (tid, bid, aid, delta, mtime)
-SELECT %(tid)s, %(bid)s, aid, %(delta)s, clock_timestamp()
-FROM pgbench_accounts
-WHERE aid BETWEEN %(aid_upd_from)s AND %(aid_upd_to)s
+VALUES (%(tid)s, %(bid)s, %(aid)s, %(delta)s, clock_timestamp())
 """.strip(),
     """
 SELECT count(*), sum(delta)
@@ -204,7 +209,22 @@ WHERE bid = %(bid)s
 """.strip(),
 )
 
-PG_LIKE_WRITE_SQL = "BEGIN;\n\n" + ";\n\n".join(PG_LIKE_WRITE_SQL_STMTS) + ";\n\nCOMMIT;"
+PG_LIKE_WRITE_SQL_STMTS = PG_LIKE_WRITE_PRIMARY_SQL_STMTS + PG_LIKE_WRITE_AUXILIARY_SQL_STMTS
+
+PG_LIKE_WRITE_SQL = (
+    "-- Базовая часть: выполняется в каждой write-транзакции.\n"
+    "BEGIN;\n\n"
+    + ";\n\n".join(PG_LIKE_WRITE_PRIMARY_SQL_STMTS)
+    + ";\n\nCOMMIT;"
+)
+
+PG_LIKE_WRITE_AUXILIARY_SQL = (
+    f"-- Дополнительная часть: приложение выполняет этот блок примерно в каждой {WRITE_AUXILIARY_EVERY}-й "
+    "write-транзакции.\n"
+    "BEGIN;\n\n"
+    + ";\n\n".join(PG_LIKE_WRITE_AUXILIARY_SQL_STMTS)
+    + ";\n\nCOMMIT;"
+)
 
 
 @dataclass
@@ -358,17 +378,20 @@ def initialize_pg_like_dataset(
 def run_pg_like_tx(conn: psycopg.Connection, write_tx: bool, sizing: PgLikeSizing) -> None:
     with conn.cursor() as cur:
         if write_tx:
+            bid = random.randint(1, sizing.branch_count)
+            teller_offset = random.randint(1, sizing.tellers_per_branch)
+            account_offset = random.randint(1, sizing.accounts_per_branch)
             params = {
-                "bid": random.randint(1, sizing.branch_count),
-                "tid": random.randint(1, sizing.teller_count),
-                "aid_from": random.randint(1, sizing.account_count - 1000),
-                "aid_upd_from": random.randint(1, sizing.account_count - 100),
+                "bid": bid,
+                "tid": (bid - 1) * sizing.tellers_per_branch + teller_offset,
+                "aid": (bid - 1) * sizing.accounts_per_branch + account_offset,
                 "delta": random.randint(-1000, 1000),
             }
-            params["aid_to"] = params["aid_from"] + 1000
-            params["aid_upd_to"] = params["aid_upd_from"] + 100
-            for statement in PG_LIKE_WRITE_SQL_STMTS:
+            for statement in PG_LIKE_WRITE_PRIMARY_SQL_STMTS:
                 cur.execute(statement, params)
+            if random.randint(1, WRITE_AUXILIARY_EVERY) == 1:
+                for statement in PG_LIKE_WRITE_AUXILIARY_SQL_STMTS:
+                    cur.execute(statement, params)
         else:
             params = {
                 "aid": random.randint(1, sizing.account_count),
