@@ -45,6 +45,10 @@ class ClusterConfig:
 
 
 def load_cluster_config(path: Path) -> ClusterConfig:
+    if not path.exists():
+        raise FileNotFoundError(f"Конфиг не найден: {path}")
+    if not path.is_file():
+        raise ValueError(f"Ожидался JSON-файл конфига, но указан каталог: {path}")
     cfg = json.loads(path.read_text(encoding="utf-8"))
     allowed_keys = {field.name for field in fields(NodeConfig)}
     nodes = [NodeConfig(**{k: v for k, v in item.items() if k in allowed_keys}) for item in cfg.get("nodes", [])]
@@ -580,12 +584,24 @@ def render_dashboard() -> None:
     st.session_state.setdefault("cluster_dashboard_cfg_path", "config/cluster.json")
     st.session_state.setdefault("cluster_dashboard_target_db", "postgres")
 
-    cfg_path = Path(st.session_state["cluster_dashboard_cfg_path"])
+    raw_cfg_path = str(st.session_state["cluster_dashboard_cfg_path"]).strip()
+    if not raw_cfg_path:
+        st.error("Укажите путь к JSON-конфигу кластера.")
+        st.stop()
+    cfg_path = Path(raw_cfg_path)
     if not cfg_path.exists():
         st.error(f"Конфиг не найден: {cfg_path}")
         st.stop()
+    if not cfg_path.is_file():
+        st.error(f"Ожидался JSON-файл конфига, но указан каталог: {cfg_path}")
+        st.stop()
 
-    cluster = load_cluster_config(cfg_path)
+    try:
+        cluster = load_cluster_config(cfg_path)
+    except Exception as exc:
+        LOGGER.exception("Не удалось прочитать конфиг кластера: %s", cfg_path)
+        st.error(f"Не удалось прочитать конфиг: {exc}")
+        st.stop()
     if not cluster.nodes:
         st.error("В конфиге не найдено узлов")
         st.stop()
