@@ -1112,8 +1112,6 @@ def apply_compact_top_styles() -> None:
 
 
 def render_controls(cluster: ClusterConfig, collector: BackgroundMetricsCollector) -> None:
-    st.markdown("#### Управление хостами (Host controls)")
-
     snapshot_rows = collector.snapshot().get("rows", [])
     node_statuses = {row.get("node"): row.get("status") for row in snapshot_rows}
     host_cols = st.columns(len(cluster.nodes))
@@ -1121,7 +1119,11 @@ def render_controls(cluster: ClusterConfig, collector: BackgroundMetricsCollecto
     for idx, node in enumerate(cluster.nodes):
         with host_cols[idx]:
             is_running = node_statuses.get(node.name) == "up"
-            button_label = "⏹ Остановить хост" if is_running else "▶️ Запустить хост"
+            button_label = (
+                f"⏹ Остановить postgres на {node.name}"
+                if is_running
+                else f"▶️ Запустить postgres на {node.name}"
+            )
             action = "stop" if is_running else "start"
             action_ru = "остановка" if is_running else "запуск"
 
@@ -1274,9 +1276,10 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: Bac
                 localized_df[column] = localized_df[column].map(format_cluster_table_value)
         if "Error" in localized_df.columns:
             localized_df["Error"] = localized_df["Error"].fillna("")
-    st.caption(f"Целевая БД нагрузки (Target DB): {target_db}")
+    metrics_meta = f"Целевая БД нагрузки (Target DB): {target_db}"
     if snap["updated_at"] is not None:
-        st.caption(f"Последнее обновление метрик: {snap['updated_at'].strftime('%H:%M:%S')}")
+        metrics_meta += f" | Последнее обновление метрик: {snap['updated_at'].strftime('%H:%M:%S')}"
+    st.caption(metrics_meta)
     row_height_px = 35
     header_height_px = 38
     table_height = max(105, min(190, header_height_px + len(localized_df) * row_height_px))
