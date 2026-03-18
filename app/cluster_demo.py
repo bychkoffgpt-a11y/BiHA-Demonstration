@@ -1373,11 +1373,12 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: Bac
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     apply_compact_top_styles()
-    top_bar_cols = st.columns([8.8, 1.2])
-    with top_bar_cols[1]:
-        if st.button("⟳", key="scenario_refresh_now", help="Refresh now"):
+    title_cols = st.columns([8.4, 1.6], gap="small")
+    with title_cols[0]:
+        st.title(APP_TITLE)
+    with title_cols[1]:
+        if st.button("🔄 Refresh", key="scenario_refresh_now", help="Refresh now", use_container_width=True):
             st.rerun()
-    st.title(APP_TITLE)
 
     st.session_state.setdefault("cfg_path", "config/cluster.json")
     raw_cfg_path = str(st.session_state["cfg_path"]).strip()

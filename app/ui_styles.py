@@ -12,8 +12,7 @@ _BASE_PAGE_CSS = """
     }
 
     div[data-testid="stToolbar"] {
-        top: 0.25rem !important;
-        right: 0.25rem !important;
+        display: none !important;
     }
 
     div[data-testid="stDecoration"] {
@@ -27,6 +26,7 @@ _BASE_PAGE_CSS = """
     div.block-container {
         padding-top: 0.35rem !important;
         padding-bottom: 0.6rem;
+        max-width: 100% !important;
     }
 </style>
 """
