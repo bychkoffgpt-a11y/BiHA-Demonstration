@@ -40,6 +40,10 @@ class ClusterConfig:
 
 
 def load_cluster_config(path: Path) -> ClusterConfig:
+    if not path.exists():
+        raise FileNotFoundError(f"Config not found: {path}")
+    if not path.is_file():
+        raise ValueError(f"Expected a JSON config file, got a directory: {path}")
     cfg = json.loads(path.read_text(encoding="utf-8"))
     nodes = [NodeConfig(**item) for item in cfg.get("nodes", [])]
     return ClusterConfig(nodes=nodes)
@@ -197,9 +201,17 @@ st.caption(
     "для управления сервисами и файрволом на каждом узле."
 )
 
-cfg_path = Path(st.text_input("Путь к конфигу (Path to config)", "config/cluster.json"))
+raw_cfg_path = st.text_input("Путь к конфигу (Path to config)", "config/cluster.json").strip()
+if not raw_cfg_path:
+    st.error("Укажите путь к конфигу (Provide a path to the config file).")
+    st.stop()
+
+cfg_path = Path(raw_cfg_path)
 if not cfg_path.exists():
     st.error(f"Конфиг не найден (Config not found): {cfg_path}")
+    st.stop()
+if not cfg_path.is_file():
+    st.error(f"Ожидался JSON-файл конфига, но указан каталог (Expected a JSON config file, got a directory): {cfg_path}")
     st.stop()
 
 try:
