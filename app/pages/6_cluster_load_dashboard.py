@@ -538,6 +538,9 @@ def theme_chart(chart: alt.Chart) -> alt.Chart:
     )
 
 
+CHART_HEIGHT = 347
+
+
 def line_chart(df: pd.DataFrame, color_field: str, y_title: str, title: str, y_scale: alt.Scale | None = None) -> None:
     if df.empty:
         st.info("Недостаточно данных")
@@ -555,7 +558,7 @@ def line_chart(df: pd.DataFrame, color_field: str, y_title: str, title: str, y_s
             color=alt.Color(f"{color_field}:N", legend=alt.Legend(title=None)),
             tooltip=["timestamp:T", color_field, alt.Tooltip("value:Q", format=".2f")],
         )
-        .properties(title=title, height=260)
+        .properties(title=title, height=CHART_HEIGHT)
     )
     st.altair_chart(theme_chart(chart), width="stretch")
 
@@ -574,7 +577,10 @@ def render_dashboard() -> None:
     st.title("Экран производительности кластера")
     st.caption("Верхний ряд — результат нагрузки, нижний ряд — цена и устойчивость кластера.")
 
-    cfg_path = Path(st.text_input("Путь к конфигу", "config/cluster.json"))
+    st.session_state.setdefault("cluster_dashboard_cfg_path", "config/cluster.json")
+    st.session_state.setdefault("cluster_dashboard_target_db", "postgres")
+
+    cfg_path = Path(st.session_state["cluster_dashboard_cfg_path"])
     if not cfg_path.exists():
         st.error(f"Конфиг не найден: {cfg_path}")
         st.stop()
@@ -587,7 +593,7 @@ def render_dashboard() -> None:
     primary = next((n for n in cluster.nodes if n.role_hint.lower() in {"master", "primary", "leader"}), cluster.nodes[0])
     standby = next((n for n in cluster.nodes if n.role_hint.lower() in {"slave", "replica", "standby"}), None)
 
-    target_db = st.text_input("Рабочая БД для TPS", "postgres")
+    target_db = st.session_state["cluster_dashboard_target_db"]
     col1, col2, col3 = st.columns(3)
     auto_refresh = col1.checkbox("Автообновление", value=True)
     interval_sec = col2.select_slider("Шаг агрегации (сек)", options=[5, 10, 15, 30], value=10)
@@ -624,7 +630,7 @@ def render_dashboard() -> None:
                         color=alt.Color("state:N", legend=alt.Legend(title=None)),
                         tooltip=["timestamp:T", "state:N", alt.Tooltip("value:Q", format=".0f")],
                     )
-                    .properties(title="Active sessions by state", height=260)
+                    .properties(title="Active sessions by state", height=CHART_HEIGHT)
                 )
                 st.altair_chart(theme_chart(chart), width="stretch")
     
@@ -670,6 +676,12 @@ def render_dashboard() -> None:
                 for col, chart_renderer in zip(second_row, charts[4:], strict=True):
                     with col:
                         chart_renderer()
+
+    st.divider()
+    st.caption("Параметры источника данных")
+    source_col1, source_col2 = st.columns(2)
+    source_col1.text_input("Путь к конфигу", key="cluster_dashboard_cfg_path")
+    source_col2.text_input("Рабочая БД для TPS", key="cluster_dashboard_target_db")
 
     if auto_refresh:
         st.caption("Сбор метрик выполняется в фоновом потоке. Интерфейс обновляется отдельно.")
