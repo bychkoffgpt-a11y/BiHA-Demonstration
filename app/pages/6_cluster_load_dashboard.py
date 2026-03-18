@@ -545,6 +545,109 @@ def theme_chart(chart: alt.Chart) -> alt.Chart:
 CHART_HEIGHT = 347
 
 
+CHART_EXPLANATIONS = {
+    "tps": """
+**Источник данных**
+- PostgreSQL view: `pg_stat_database`
+- Поля: `xact_commit`, `xact_rollback`
+- Фильтр: только выбранная рабочая БД (`Рабочая БД для TPS`)
+
+**Как считаются точки**
+1. При каждом срезе приложение читает накопительные счётчики commit/rollback.
+2. Для соседних срезов считается разница счётчиков.
+3. Разница делится на фактический интервал между срезами в секундах.
+
+**Что показывает график**
+- `COMMIT/s` = `(curr.xact_commit - prev.xact_commit) / dt`
+- `ROLLBACK/s` = `(curr.xact_rollback - prev.xact_rollback) / dt`
+
+Если счётчик сбросился или данных недостаточно, точка не рисуется.
+""".strip(),
+    "latency": """
+**Источник данных**
+- PostgreSQL view: `pg_stat_activity`
+- Используются только активные client backend-сессии с ненулевым `query_start`
+
+**Как считается значение**
+1. Для каждого активного запроса берётся текущее время выполнения:
+   `clock_timestamp() - query_start`
+2. Значение переводится в миллисекунды.
+3. На SQL-стороне считается 95-й процентиль через `percentile_cont(0.95)`.
+
+**Что важно понимать**
+- Это не историческая latency из трассировки запросов.
+- Это моментальный p95 по запросам, которые активны в момент снятия среза.
+- Если активных запросов нет, точка отсутствует.
+""".strip(),
+    "sessions": """
+**Источник данных**
+- PostgreSQL view: `pg_stat_activity`
+- Фильтр: `backend_type = 'client backend'`
+
+**Как считаются серии**
+- `active` — сессии со state = `active`
+- `waiting` — активные сессии, у которых `wait_event_type IS NOT NULL`
+- `idle in xact` — state = `idle in transaction`
+- `idle` — state = `idle`
+
+**Что показывает график**
+- Это stacked area-график моментальных значений по числу клиентских сессий.
+- Каждая точка — снимок состояния в момент очередного опроса.
+""".strip(),
+    "cpu": """
+**Источник данных**
+- Метрика берётся по SSH с primary и standby-узлов.
+- На хосте читается `/proc/stat` два раза с паузой 1 секунда.
+
+**Как считается загрузка CPU**
+1. Из первой и второй строки `cpu ...` берутся суммарные счётчики времени CPU.
+2. Считается прирост total и idle.
+3. Используется формула:
+   `CPU% = (total_delta - idle_delta) / total_delta * 100`
+
+**Что показывает график**
+- `Primary CPU` — загрузка primary-узла.
+- `Standby CPU` — загрузка standby-узла.
+
+Если SSH недоступен или ответ не разобрался, точка пропускается.
+""".strip(),
+    "disk": """
+**Источник данных**
+- Метрика берётся по SSH только с primary-узла.
+- Основной способ: `iostat -dx 1 2`
+- Резервный способ: расчёт по `/proc/diskstats`
+
+**Как считается latency**
+- При использовании `iostat` берутся поля:
+  - `r_await` → latency чтения
+  - `w_await` → latency записи
+- При fallback-режиме приложение считает среднее время на операцию по дельте счётчиков чтения/записи между двумя замерами.
+
+**Что показывает график**
+- `Read` — средняя latency чтения диска в миллисекундах
+- `Write` — средняя latency записи диска в миллисекундах
+
+Если в конфиге задан `disk_device`, график строится именно по этому устройству.
+""".strip(),
+    "wal": """
+**Источник данных**
+- PostgreSQL view: `pg_stat_wal`
+- Поле: `wal_bytes`
+
+**Как считаются точки**
+1. При каждом срезе читается накопительный объём WAL в байтах.
+2. Для соседних срезов считается дельта `wal_bytes`.
+3. Дельта делится на интервал между срезами.
+4. Затем значение переводится из байт/с в МБ/с.
+
+**Формула**
+- `WAL MB/s = (curr.wal_bytes - prev.wal_bytes) / dt / 1024 / 1024`
+
+Если счётчик обнулился или данных недостаточно, точка не рисуется.
+""".strip(),
+}
+
+
 def line_chart(df: pd.DataFrame, color_field: str, y_title: str, title: str, y_scale: alt.Scale | None = None) -> None:
     if df.empty:
         st.info("Недостаточно данных")
@@ -567,6 +670,14 @@ def line_chart(df: pd.DataFrame, color_field: str, y_title: str, title: str, y_s
     st.altair_chart(theme_chart(chart), width="stretch")
 
 
+def render_chart_help(chart_key: str) -> None:
+    help_text = CHART_EXPLANATIONS[chart_key]
+    help_cols = st.columns([0.12, 0.88])
+    with help_cols[0]:
+        with st.popover("i", help="Откуда и как считаются данные графика", use_container_width=True):
+            st.markdown(help_text)
+
+
 def schedule_ui_refresh(interval_ms: int, key: str) -> None:
     if st_autorefresh is not None:
         st_autorefresh(interval=interval_ms, key=key)
@@ -580,6 +691,21 @@ def render_dashboard() -> None:
     st.set_page_config(page_title="Экран производительности кластера", layout="wide")
     st.title("Экран производительности кластера")
     st.caption("Верхний ряд — результат нагрузки, нижний ряд — цена и устойчивость кластера.")
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stPopover"] button[kind="secondary"] {
+            min-height: 1.75rem;
+            height: 1.75rem;
+            padding: 0 0.45rem;
+            border-radius: 999px;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     st.session_state.setdefault("cluster_dashboard_cfg_path", "config/cluster.json")
     st.session_state.setdefault("cluster_dashboard_target_db", "postgres")
@@ -649,21 +775,27 @@ def render_dashboard() -> None:
                     .properties(title="Active sessions by state", height=CHART_HEIGHT)
                 )
                 st.altair_chart(theme_chart(chart), width="stretch")
+            render_chart_help("sessions")
     
         def render_tps_chart() -> None:
             line_chart(series["tps"], "metric", "транзакции/с", "TPS (транзакции/с)", alt.Scale(zero=True))
+            render_chart_help("tps")
     
         def render_latency_chart() -> None:
             line_chart(series["latency"], "metric", "мс", "Latency p95 (мс)", alt.Scale(zero=True))
+            render_chart_help("latency")
     
         def render_cpu_chart() -> None:
             line_chart(series["cpu"], "node", "%", "CPU primary / standby (%)", alt.Scale(domain=[0, 100]))
+            render_chart_help("cpu")
     
         def render_disk_chart() -> None:
             line_chart(series["disk"], "metric", "мс", "Disk latency (Primary, мс)", alt.Scale(zero=True))
+            render_chart_help("disk")
     
         def render_wal_chart() -> None:
             line_chart(series["wal"], "metric", "МБ/с", "WAL generation rate (MB/s)", alt.Scale(zero=True))
+            render_chart_help("wal")
     
         charts: list[Callable[[], None]] = [
             render_tps_chart,
