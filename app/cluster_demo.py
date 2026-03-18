@@ -859,9 +859,9 @@ def open_reset_caches_dialog(cluster: ClusterConfig) -> None:
 
 def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, Any]:
     st.sidebar.header("Управление нагрузкой")
-    st.sidebar.info(f"Статус генератора: {'🟢 РАБОТАЕТ' if wg.running else '🔴 ОСТАНОВЛЕН'}")
     toggle_label = "⏹ Остановить нагрузку" if wg.running else "▶️ Запустить нагрузку"
-    if st.sidebar.button(toggle_label, key="sidebar_toggle_load", use_container_width=True, type="primary"):
+    toggle_type = "primary" if wg.running else "secondary"
+    if st.sidebar.button(toggle_label, key="sidebar_toggle_load", use_container_width=True, type=toggle_type):
         if wg.running:
             wg.stop()
         else:
@@ -875,7 +875,7 @@ def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, A
         st.rerun()
 
     st.sidebar.divider()
-    st.sidebar.header("Профиль нагрузки (Load profile)")
+    st.sidebar.header("Профиль нагрузки")
 
     legacy_mode_mapping = {
         "single-node": "rw-master",
@@ -915,7 +915,7 @@ def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, A
             st.session_state[key] = int(st.session_state[input_key])
 
     mode = st.sidebar.selectbox(
-        "Режим (Mode)",
+        "Режим",
         options=["r-master", "rw-master", "r-master-r-slave", "rw-master-r-slave"],
         help=(
             "r-master: только чтение с master; "
@@ -948,10 +948,10 @@ def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, A
         )
     else:
         st.sidebar.caption(f"Итого рабочих потоков генератора: {total_workers}")
-    read_ratio = st.sidebar.slider("Доля чтения (Read ratio)", 0.0, 1.0, step=0.05, key="load_read_ratio")
+    read_ratio = st.sidebar.slider("Доля чтения", 0.0, 1.0, step=0.05, key="load_read_ratio")
     if mode in {"r-master", "r-master-r-slave"}:
-        st.sidebar.caption("Для read-only профилей параметр `Read ratio` не используется: генератор выполняет только чтение.")
-    auto_refresh = st.sidebar.checkbox("Автообновление (Auto-refresh)", key="load_auto_refresh")
+        st.sidebar.caption("Для профилей только на чтение параметр `Доля чтения` не используется: генератор выполняет только чтение.")
+    auto_refresh = st.sidebar.checkbox("Автообновление", key="load_auto_refresh")
 
     st.session_state.persist_load_mode = mode
     st.session_state.persist_load_clients = int(clients)
@@ -1049,6 +1049,68 @@ def apply_compact_top_styles() -> None:
                 min-height: 1.35rem !important;
                 padding: 0.05rem 0.35rem !important;
                 line-height: 1.15 !important;
+            }
+
+            section[data-testid="stSidebar"] div[data-testid="stSidebarUserContent"] {
+                padding-top: 0.75rem !important;
+            }
+
+            section[data-testid="stSidebar"] h2 {
+                font-size: 1.85rem !important;
+            }
+
+            section[data-testid="stSidebar"] h3 {
+                font-size: 1.16rem !important;
+                margin-top: 0.35rem !important;
+                margin-bottom: 0.15rem !important;
+            }
+
+            section[data-testid="stSidebar"] hr {
+                margin-top: 0.75rem !important;
+                margin-bottom: 0.75rem !important;
+            }
+
+            section[data-testid="stSidebar"] div[data-testid="stSelectbox"] label p,
+            section[data-testid="stSidebar"] div[data-testid="stSlider"] label p,
+            section[data-testid="stSidebar"] div[data-testid="stNumberInput"] label p,
+            section[data-testid="stSidebar"] div[data-testid="stCheckbox"] label p {
+                font-size: 0.86rem !important;
+                line-height: 1.1 !important;
+            }
+
+            section[data-testid="stSidebar"] div[data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+            section[data-testid="stSidebar"] div[data-testid="stNumberInput"] input,
+            section[data-testid="stSidebar"] div[data-testid="stTextInput"] input {
+                min-height: 2.15rem !important;
+                padding-top: 0.2rem !important;
+                padding-bottom: 0.2rem !important;
+            }
+
+            section[data-testid="stSidebar"] div[data-testid="stButton"] button {
+                min-height: 1.85rem !important;
+                padding-top: 0.1rem !important;
+                padding-bottom: 0.1rem !important;
+                font-size: 0.95rem !important;
+            }
+
+            section[data-testid="stSidebar"] div[data-testid="stButton"]:first-of-type button[kind="primary"] {
+                background-color: #16a34a !important;
+                border-color: #16a34a !important;
+                color: #ffffff !important;
+            }
+
+            section[data-testid="stSidebar"] div[data-testid="stButton"]:first-of-type button[kind="secondary"] {
+                background-color: #dc2626 !important;
+                border-color: #dc2626 !important;
+                color: #ffffff !important;
+            }
+
+            section[data-testid="stSidebar"] div[data-testid="stButton"]:first-of-type button:hover {
+                filter: brightness(0.95) !important;
+            }
+
+            section[data-testid="stSidebar"] div[data-testid="stSlider"] {
+                margin-bottom: 0.15rem !important;
             }
         </style>
         """,
