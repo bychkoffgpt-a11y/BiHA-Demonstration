@@ -703,10 +703,13 @@ def render_dashboard() -> None:
         """,
     )
     st.title("Экран производительности кластера")
-    st.caption("Верхний ряд — результат нагрузки, нижний ряд — цена и устойчивость кластера.")
 
     st.session_state.setdefault("cluster_dashboard_cfg_path", "config/cluster.json")
     st.session_state.setdefault("cluster_dashboard_target_db", "postgres")
+    st.session_state.setdefault("cluster_dashboard_auto_refresh", True)
+    st.session_state.setdefault("cluster_dashboard_interval_sec", 10)
+    st.session_state.setdefault("cluster_dashboard_window_minutes", 30)
+    st.session_state.setdefault("cluster_dashboard_compact_grid", False)
 
     raw_cfg_path = str(st.session_state["cluster_dashboard_cfg_path"]).strip()
     if not raw_cfg_path:
@@ -734,11 +737,10 @@ def render_dashboard() -> None:
     standby = next((n for n in cluster.nodes if n.role_hint.lower() in {"slave", "replica", "standby"}), None)
 
     target_db = st.session_state["cluster_dashboard_target_db"]
-    col1, col2, col3 = st.columns(3)
-    auto_refresh = col1.checkbox("Автообновление", value=True)
-    interval_sec = col2.select_slider("Шаг агрегации (сек)", options=[5, 10, 15, 30], value=10)
-    window_minutes = col3.select_slider("Интервал по X (мин)", options=[15, 30, 45, 60], value=30)
-    compact_grid = st.checkbox("Вертикальная сетка (4 ряда × 2 графика)", value=False)
+    auto_refresh = bool(st.session_state["cluster_dashboard_auto_refresh"])
+    interval_sec = int(st.session_state["cluster_dashboard_interval_sec"])
+    window_minutes = int(st.session_state["cluster_dashboard_window_minutes"])
+    compact_grid = bool(st.session_state["cluster_dashboard_compact_grid"])
 
     history_limit = int((window_minutes * 60) / interval_sec) + 30
 
@@ -748,9 +750,6 @@ def render_dashboard() -> None:
 
     if auto_refresh:
         collector.start(lambda: fetch_snapshot(primary, standby, target_db))
-
-    if st.button("Снять новый срез", type="primary", width="stretch"):
-        collector.collect_once(lambda: fetch_snapshot(primary, standby, target_db))
 
     series = build_timeseries(collector.history(), window_minutes)
     if not series:
@@ -822,6 +821,25 @@ def render_dashboard() -> None:
                 for col, chart_renderer in zip(second_row, charts[4:], strict=True):
                     with col:
                         chart_renderer()
+
+    st.divider()
+
+    controls_col1, controls_col2, controls_col3 = st.columns(3)
+    controls_col1.checkbox("Автообновление", key="cluster_dashboard_auto_refresh")
+    controls_col2.select_slider(
+        "Шаг агрегации (сек)",
+        options=[5, 10, 15, 30],
+        key="cluster_dashboard_interval_sec",
+    )
+    controls_col3.select_slider(
+        "Интервал по X (мин)",
+        options=[15, 30, 45, 60],
+        key="cluster_dashboard_window_minutes",
+    )
+    st.checkbox("Вертикальная сетка (4 ряда × 2 графика)", key="cluster_dashboard_compact_grid")
+    if st.button("Снять новый срез", type="primary", width="stretch"):
+        collector.collect_once(lambda: fetch_snapshot(primary, standby, target_db))
+        st.rerun()
 
     st.divider()
     st.caption("Параметры источника данных")
