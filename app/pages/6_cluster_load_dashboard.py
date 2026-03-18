@@ -657,7 +657,12 @@ CHART_EXPLANATIONS = {
 }
 
 
-def line_chart(df: pd.DataFrame, color_field: str, y_title: str, title: str, y_scale: alt.Scale | None = None) -> None:
+def line_chart(
+    df: pd.DataFrame,
+    color_field: str,
+    y_title: str,
+    y_scale: alt.Scale | None = None,
+) -> None:
     if df.empty:
         st.info("Недостаточно данных")
         return
@@ -674,17 +679,15 @@ def line_chart(df: pd.DataFrame, color_field: str, y_title: str, title: str, y_s
             color=alt.Color(f"{color_field}:N", legend=alt.Legend(title=None)),
             tooltip=["timestamp:T", color_field, alt.Tooltip("value:Q", format=".2f")],
         )
-        .properties(title=title, height=CHART_HEIGHT)
+        .properties(height=CHART_HEIGHT)
     )
     st.altair_chart(theme_chart(chart), width="stretch")
 
 
-def render_chart_help(chart_key: str) -> None:
+def render_chart_help(chart_key: str, chart_title: str) -> None:
     help_text = CHART_EXPLANATIONS[chart_key]
-    help_cols = st.columns([0.12, 0.88])
-    with help_cols[0]:
-        with st.popover("i", help="Откуда и как считаются данные графика", use_container_width=True):
-            st.markdown(help_text)
+    with st.popover(chart_title, help="Нажмите, чтобы посмотреть описание графика", use_container_width=True):
+        st.markdown(help_text)
 
 
 def schedule_ui_refresh(interval_ms: int, key: str) -> None:
@@ -790,12 +793,22 @@ def render_dashboard() -> None:
     apply_base_page_styles(
         """
         div[data-testid="stPopover"] button[kind="secondary"] {
-            min-height: 1.75rem;
-            height: 1.75rem;
-            padding: 0 0.45rem;
-            border-radius: 999px;
-            font-size: 0.85rem;
-            font-weight: 600;
+            min-height: auto;
+            height: auto;
+            width: 100%;
+            padding: 0 0 0.35rem;
+            border: none;
+            border-radius: 0;
+            background: transparent;
+            box-shadow: none;
+            justify-content: flex-start;
+            font-size: 1.05rem;
+            font-weight: 700;
+            color: #0f172a;
+            text-align: left;
+        }
+        div[data-testid="stPopover"] button[kind="secondary"]:hover {
+            color: #2563eb;
         }
         .workload-status-banner {
             display: grid;
@@ -902,6 +915,7 @@ def render_dashboard() -> None:
             return
 
         def render_sessions_chart() -> None:
+            render_chart_help("sessions", "Active sessions by state")
             sessions_df = series["sessions"].dropna(subset=["value"])
             if sessions_df.empty:
                 st.info("Недостаточно данных")
@@ -915,30 +929,29 @@ def render_dashboard() -> None:
                         color=alt.Color("state:N", legend=alt.Legend(title=None)),
                         tooltip=["timestamp:T", "state:N", alt.Tooltip("value:Q", format=".0f")],
                     )
-                    .properties(title="Active sessions by state", height=CHART_HEIGHT)
+                    .properties(height=CHART_HEIGHT)
                 )
                 st.altair_chart(theme_chart(chart), width="stretch")
-            render_chart_help("sessions")
 
         def render_tps_chart() -> None:
-            line_chart(series["tps"], "metric", "транзакции/с", "TPS (транзакции/с)", alt.Scale(zero=True))
-            render_chart_help("tps")
+            render_chart_help("tps", "TPS (транзакции/с)")
+            line_chart(series["tps"], "metric", "транзакции/с", alt.Scale(zero=True))
 
         def render_latency_chart() -> None:
-            line_chart(series["latency"], "metric", "мс", "Latency p95 (мс)", alt.Scale(zero=True))
-            render_chart_help("latency")
+            render_chart_help("latency", "Latency p95 (мс)")
+            line_chart(series["latency"], "metric", "мс", alt.Scale(zero=True))
 
         def render_cpu_chart() -> None:
-            line_chart(series["cpu"], "node", "%", "CPU primary / standby (%)", alt.Scale(domain=[0, 100]))
-            render_chart_help("cpu")
+            render_chart_help("cpu", "CPU primary / standby (%)")
+            line_chart(series["cpu"], "node", "%", alt.Scale(domain=[0, 100]))
 
         def render_disk_chart() -> None:
-            line_chart(series["disk"], "metric", "мс", "Disk latency (Primary, мс)", alt.Scale(zero=True))
-            render_chart_help("disk")
+            render_chart_help("disk", "Disk latency (Primary, мс)")
+            line_chart(series["disk"], "metric", "мс", alt.Scale(zero=True))
 
         def render_wal_chart() -> None:
-            line_chart(series["wal"], "metric", "МБ/с", "WAL generation rate (MB/s)", alt.Scale(zero=True))
-            render_chart_help("wal")
+            render_chart_help("wal", "WAL generation rate (MB/s)")
+            line_chart(series["wal"], "metric", "МБ/с", alt.Scale(zero=True))
 
         charts: list[Callable[[], None]] = [
             render_tps_chart,
