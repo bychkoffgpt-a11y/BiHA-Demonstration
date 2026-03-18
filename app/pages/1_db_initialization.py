@@ -51,7 +51,7 @@ except Exception as exc:
     st.error(f"Не удалось прочитать конфиг: {exc}")
 
 if cluster is not None:
-    node = select_node_for_workload(cluster.nodes, "single-node", write_tx=True)
+    node = select_node_for_workload(cluster.nodes, "rw-master", write_tx=True)
     if not node:
         st.warning("В конфиге нет узлов")
     else:

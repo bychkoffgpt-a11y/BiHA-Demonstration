@@ -66,62 +66,145 @@ SELECT gs, ((gs - 1) / %(accounts_per_branch)s)::int + 1, 0
 FROM generate_series(%(id_from)s, %(id_to)s) AS gs;
 """.strip()
 
-PG_LIKE_READ_SQL = """
-SELECT
-    count(*) AS scanned_rows,
-    sum(abalance) AS balance_sum,
-    sum(length(filler)) AS filler_bytes
+PG_LIKE_READ_SCRIPT_SQL = r"""
+\set aid random(1, :scale * 100000)
+\set bid random(1, :scale)
+\set tid random(1, :scale * 10)
+
+SELECT abalance, bid
 FROM pgbench_accounts
-WHERE (aid %% %(bucket_count)s) = %(bucket_id)s;
+WHERE aid = :aid;
+
+SELECT bid,
+       count(*) AS cnt,
+       sum(abalance) AS total_balance,
+       avg(abalance) AS avg_balance
+FROM pgbench_accounts
+WHERE bid = :bid
+GROUP BY bid;
+
+SELECT a.aid, a.abalance, t.tid, t.tbalance, b.bid, b.bbalance
+FROM pgbench_accounts a
+JOIN pgbench_tellers t ON t.bid = a.bid
+JOIN pgbench_branches b ON b.bid = a.bid
+WHERE a.aid = :aid
+  AND t.tid = :tid;
+
+SELECT aid, abalance
+FROM pgbench_accounts
+WHERE bid = :bid
+ORDER BY abalance DESC
+LIMIT 20;
+""".strip()
+
+PG_LIKE_READ_SQL_STMTS = (
+    """
+SELECT abalance, bid
+FROM pgbench_accounts
+WHERE aid = %(aid)s
+""".strip(),
+    """
+SELECT bid,
+       count(*) AS cnt,
+       sum(abalance) AS total_balance,
+       avg(abalance) AS avg_balance
+FROM pgbench_accounts
+WHERE bid = %(bid)s
+GROUP BY bid
+""".strip(),
+    """
+SELECT a.aid, a.abalance, t.tid, t.tbalance, b.bid, b.bbalance
+FROM pgbench_accounts a
+JOIN pgbench_tellers t ON t.bid = a.bid
+JOIN pgbench_branches b ON b.bid = a.bid
+WHERE a.aid = %(aid)s
+  AND t.tid = %(tid)s
+""".strip(),
+    """
+SELECT aid, abalance
+FROM pgbench_accounts
+WHERE bid = %(bid)s
+ORDER BY abalance DESC
+LIMIT 20
+""".strip(),
+)
+
+PG_LIKE_READ_SQL = ";\n\n".join(PG_LIKE_READ_SQL_STMTS) + ";"
+
+PG_LIKE_WRITE_SCRIPT_SQL = r"""
+\set bid random(1, :scale)
+\set tid random(1, :scale * 10)
+\set aid_from random(1, :scale * 100000 - 1000)
+\set aid_to :aid_from + 1000
+\set aid_upd_from random(1, :scale * 100000 - 100)
+\set aid_upd_to :aid_upd_from + 100
+\set delta random(-1000, 1000)
+
+BEGIN;
+
+SELECT sum(abalance)
+FROM pgbench_accounts
+WHERE aid BETWEEN :aid_from AND :aid_to;
+
+UPDATE pgbench_accounts
+SET abalance = abalance + :delta
+WHERE aid BETWEEN :aid_upd_from AND :aid_upd_to;
+
+UPDATE pgbench_tellers
+SET tbalance = tbalance + :delta
+WHERE bid = :bid;
+
+UPDATE pgbench_branches
+SET bbalance = bbalance + :delta
+WHERE bid = :bid;
+
+INSERT INTO pgbench_history (tid, bid, aid, delta, mtime)
+SELECT :tid, :bid, aid, :delta, clock_timestamp()
+FROM pgbench_accounts
+WHERE aid BETWEEN :aid_upd_from AND :aid_upd_to;
+
+SELECT count(*), sum(delta)
+FROM pgbench_history
+WHERE bid = :bid;
+
+COMMIT;
 """.strip()
 
 PG_LIKE_WRITE_SQL_STMTS = (
     """
-WITH sel AS (
-    SELECT floor(random() * %(account_count)s + 1)::int AS aid,
-           floor(random() * %(teller_count)s + 1)::int AS tid,
-           floor(random() * %(branch_count)s + 1)::int AS bid,
-           floor(random() * 2000 - 1000)::int AS delta
-)
-UPDATE pgbench_accounts a
-SET abalance = a.abalance + sel.delta
-FROM sel
-WHERE a.aid = sel.aid
+SELECT sum(abalance)
+FROM pgbench_accounts
+WHERE aid BETWEEN %(aid_from)s AND %(aid_to)s
 """.strip(),
     """
-
-WITH sel AS (
-    SELECT floor(random() * %(teller_count)s + 1)::int AS tid,
-           floor(random() * %(branch_count)s + 1)::int AS bid,
-           floor(random() * 2000 - 1000)::int AS delta
-)
-UPDATE pgbench_tellers t
-SET tbalance = t.tbalance + sel.delta
-FROM sel
-WHERE t.tid = sel.tid
+UPDATE pgbench_accounts
+SET abalance = abalance + %(delta)s
+WHERE aid BETWEEN %(aid_upd_from)s AND %(aid_upd_to)s
 """.strip(),
     """
-
-WITH sel AS (
-    SELECT floor(random() * %(branch_count)s + 1)::int AS bid,
-           floor(random() * 2000 - 1000)::int AS delta
-)
-UPDATE pgbench_branches b
-SET bbalance = b.bbalance + sel.delta
-FROM sel
-WHERE b.bid = sel.bid
+UPDATE pgbench_tellers
+SET tbalance = tbalance + %(delta)s
+WHERE bid = %(bid)s
 """.strip(),
     """
-
-INSERT INTO pgbench_history (tid, bid, aid, delta)
-SELECT floor(random() * %(teller_count)s + 1)::int,
-       floor(random() * %(branch_count)s + 1)::int,
-       floor(random() * %(account_count)s + 1)::int,
-       floor(random() * 2000 - 1000)::int
+UPDATE pgbench_branches
+SET bbalance = bbalance + %(delta)s
+WHERE bid = %(bid)s
+""".strip(),
+    """
+INSERT INTO pgbench_history (tid, bid, aid, delta, mtime)
+SELECT %(tid)s, %(bid)s, aid, %(delta)s, clock_timestamp()
+FROM pgbench_accounts
+WHERE aid BETWEEN %(aid_upd_from)s AND %(aid_upd_to)s
+""".strip(),
+    """
+SELECT count(*), sum(delta)
+FROM pgbench_history
+WHERE bid = %(bid)s
 """.strip(),
 )
 
-PG_LIKE_WRITE_SQL = ";\n\n".join(PG_LIKE_WRITE_SQL_STMTS) + ";"
+PG_LIKE_WRITE_SQL = "BEGIN;\n\n" + ";\n\n".join(PG_LIKE_WRITE_SQL_STMTS) + ";\n\nCOMMIT;"
 
 
 @dataclass
@@ -276,18 +359,21 @@ def run_pg_like_tx(conn: psycopg.Connection, write_tx: bool, sizing: PgLikeSizin
     with conn.cursor() as cur:
         if write_tx:
             params = {
-                "account_count": sizing.account_count,
-                "teller_count": sizing.teller_count,
-                "branch_count": sizing.branch_count,
+                "bid": random.randint(1, sizing.branch_count),
+                "tid": random.randint(1, sizing.teller_count),
+                "aid_from": random.randint(1, sizing.account_count - 1000),
+                "aid_upd_from": random.randint(1, sizing.account_count - 100),
+                "delta": random.randint(-1000, 1000),
             }
+            params["aid_to"] = params["aid_from"] + 1000
+            params["aid_upd_to"] = params["aid_upd_from"] + 100
             for statement in PG_LIKE_WRITE_SQL_STMTS:
                 cur.execute(statement, params)
         else:
-            bucket_count = min(64, max(8, sizing.account_count // 10000))
-            cur.execute(
-                PG_LIKE_READ_SQL,
-                {
-                    "bucket_count": bucket_count,
-                    "bucket_id": random.randint(0, bucket_count - 1),
-                },
-            )
+            params = {
+                "aid": random.randint(1, sizing.account_count),
+                "bid": random.randint(1, sizing.branch_count),
+                "tid": random.randint(1, sizing.teller_count),
+            }
+            for statement in PG_LIKE_READ_SQL_STMTS:
+                cur.execute(statement, params)

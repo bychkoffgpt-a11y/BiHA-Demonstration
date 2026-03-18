@@ -75,7 +75,7 @@ class WorkloadGenerator:
         self._stats: dict[str, int] = {"read_tx": 0, "write_tx": 0, "errors": 0}
         self._recent_errors: list[dict[str, Any]] = []
         self._cluster: ClusterConfig | None = None
-        self._mode: str = "single-node"
+        self._mode: str = "rw-master"
         self._read_ratio: float = 0.7
         self._desired_workers: int = 1
         self._sizing: PgLikeSizing = estimate_pg_like_sizing(DEFAULT_WORKLOAD_DB_SIZE_GB)
@@ -166,7 +166,7 @@ class WorkloadGenerator:
         while not self._stop_event.is_set() and not worker_stop_event.is_set():
             node: NodeConfig | None = None
             write_tx = False
-            mode = "single-node"
+            mode = "rw-master"
             try:
                 with self._settings_lock:
                     cluster = self._cluster
@@ -176,7 +176,8 @@ class WorkloadGenerator:
                 if cluster is None:
                     raise RuntimeError("Cluster config is not initialized")
 
-                write_tx = random.random() > read_ratio
+                read_only_modes = {"r-master", "r-master-r-slave"}
+                write_tx = False if mode in read_only_modes else random.random() > read_ratio
                 node = select_node_for_workload(cluster.nodes, mode, write_tx)
                 if not node:
                     raise RuntimeError("No available node for selected mode")
@@ -238,7 +239,7 @@ class BackgroundMetricsCollector:
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
-        self._mode: str = "single-node"
+        self._mode: str = "rw-master"
         self._cluster_signature: tuple[Any, ...] | None = None
         self._latest_rows: list[dict[str, Any]] = []
         self._latest_target_db: str = "postgres"
@@ -351,19 +352,21 @@ def select_node_for_workload(nodes: list[NodeConfig], mode: str, write_tx: bool)
 
     fallback_node = nodes[0] if nodes else None
 
-    if mode in {"single-node", "master-rw"}:
+    if mode in {"single-node", "master-rw", "rw-master", "r-master"}:
         return masters[0] if masters else fallback_node
 
-    if mode == "dual-read":
-        if write_tx:
-            return masters[0] if masters else fallback_node
+    if mode in {"dual-read", "r-master-r-slave"}:
+        readable_nodes = masters + slaves
+        if readable_nodes:
+            return random.choice(readable_nodes)
         return random.choice(nodes) if nodes else fallback_node
 
-    if mode == "master-rw-slave-r":
+    if mode in {"master-rw-slave-r", "rw-master-r-slave"}:
         if write_tx:
             return masters[0] if masters else fallback_node
-        if slaves:
-            return random.choice(slaves)
+        readable_nodes = masters + slaves
+        if readable_nodes:
+            return random.choice(readable_nodes)
         if masters:
             return masters[0]
         return fallback_node
@@ -783,8 +786,15 @@ def run_node_action(node: NodeConfig, action: str) -> tuple[bool, str]:
 def render_sidebar() -> dict[str, Any]:
     st.sidebar.header("Профиль нагрузки (Load profile)")
 
+    legacy_mode_mapping = {
+        "single-node": "rw-master",
+        "master-rw": "rw-master",
+        "dual-read": "r-master-r-slave",
+        "master-rw-slave-r": "rw-master-r-slave",
+    }
+
     defaults = {
-        "load_mode": "master-rw",
+        "load_mode": "rw-master",
         "load_clients": 10,
         "load_threads_per_client": 1,
         "load_read_ratio": 0.7,
@@ -797,8 +807,12 @@ def render_sidebar() -> dict[str, Any]:
         persistent_key = f"persist_{key}"
         if persistent_key not in st.session_state:
             st.session_state[persistent_key] = default
+        if key == "load_mode":
+            st.session_state[persistent_key] = legacy_mode_mapping.get(st.session_state[persistent_key], st.session_state[persistent_key])
         if key not in st.session_state:
             st.session_state[key] = st.session_state[persistent_key]
+        elif key == "load_mode":
+            st.session_state[key] = legacy_mode_mapping.get(st.session_state[key], st.session_state[key])
 
     # Sync exact number inputs to slider-backed values before widgets are instantiated.
     # Streamlit does not allow changing widget state after the widget with the same key is created.
@@ -811,12 +825,12 @@ def render_sidebar() -> dict[str, Any]:
 
     mode = st.sidebar.selectbox(
         "Режим (Mode)",
-        options=["master-rw", "dual-read", "master-rw-slave-r", "single-node"],
+        options=["r-master", "rw-master", "r-master-r-slave", "rw-master-r-slave"],
         help=(
-            "master-rw: чтение и запись только на master; "
-            "dual-read: запись на master, чтение с обеих; "
-            "master-rw-slave-r: запись на master, чтение преимущественно со slave; "
-            "single-node: legacy-алиас master-rw"
+            "r-master: только чтение с master; "
+            "rw-master: чтение и запись на master; "
+            "r-master-r-slave: чтение распределяется между master и slave; "
+            "rw-master-r-slave: запись идёт на master, чтение распределяется между master и slave"
         ),
         key="load_mode",
     )
@@ -844,6 +858,8 @@ def render_sidebar() -> dict[str, Any]:
     else:
         st.sidebar.caption(f"Итого рабочих потоков генератора: {total_workers}")
     read_ratio = st.sidebar.slider("Доля чтения (Read ratio)", 0.0, 1.0, step=0.05, key="load_read_ratio")
+    if mode in {"r-master", "r-master-r-slave"}:
+        st.sidebar.caption("Для read-only профилей параметр `Read ratio` не используется: генератор выполняет только чтение.")
     auto_refresh = st.sidebar.checkbox("Автообновление (Auto-refresh)", key="load_auto_refresh")
 
     st.session_state.persist_load_mode = mode
@@ -1165,7 +1181,7 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: Bac
             else:
                 wg.start(
                     cluster,
-                    st.session_state.get("load_mode", "master-rw"),
+                    st.session_state.get("load_mode", "rw-master"),
                     int(st.session_state.get("load_clients", 1)),
                     int(st.session_state.get("load_threads_per_client", 1)),
                     float(st.session_state.get("load_read_ratio", 0.7)),
