@@ -13,7 +13,7 @@ from workload_profiles import initialize_pg_like_dataset
 
 st.set_page_config(page_title="Инициализация БД", layout="wide")
 apply_base_page_styles()
-st.title("Инициализация и наполнение БД (pgbench-like)")
+st.title("Инициализация и наполнение БД в стиле pgbench")
 st.caption("Создание схемы и генерация данных по целевому размеру БД в ГБ.")
 
 if "db_init_state" not in st.session_state:
@@ -30,7 +30,7 @@ if "db_init_state" not in st.session_state:
 
 state = st.session_state.db_init_state
 
-cfg_path = Path(st.text_input("Путь к конфигу (Path to config)", "config/cluster.json"))
+cfg_path = Path(st.text_input("Путь к конфигурационному файлу", "config/cluster.json"))
 target_size_gb = st.number_input("Целевой размер БД, ГБ", min_value=0.1, max_value=500.0, value=1.0, step=0.1)
 cpu_count = os.cpu_count() or 1
 workers = st.number_input(

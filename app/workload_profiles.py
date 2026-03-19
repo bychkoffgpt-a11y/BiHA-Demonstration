@@ -92,9 +92,9 @@ FROM pgbench_accounts
 WHERE aid = :aid;
 
 SELECT bid,
-       count(*) AS cnt,
        sum(abalance) AS total_balance,
-       avg(abalance) AS avg_balance
+       avg(abalance) AS avg_balance,
+       max(abalance) AS max_balance
 FROM pgbench_accounts
 WHERE bid = :bid
 GROUP BY bid;
@@ -129,9 +129,9 @@ WHERE aid = %(aid)s
 """.strip(),
     """
 SELECT bid,
-       count(*) AS cnt,
        sum(abalance) AS total_balance,
-       avg(abalance) AS avg_balance
+       avg(abalance) AS avg_balance,
+       max(abalance) AS max_balance
 FROM pgbench_accounts
 WHERE bid = %(bid)s
 GROUP BY bid
@@ -177,7 +177,7 @@ PG_LIKE_WRITE_SCRIPT_SQL = r"""
 
 BEGIN;
 
--- Базовая часть: выполняется в каждой write-транзакции.
+-- Базовая часть: выполняется в каждой транзакции записи.
 SELECT abalance
 FROM pgbench_accounts
 WHERE aid = :aid;
@@ -198,7 +198,7 @@ PG_LIKE_WRITE_AUXILIARY_SCRIPT_SQL = rf"""
 BEGIN;
 
 -- Дополнительная часть: приложение выполняет этот блок примерно
--- в каждой {WRITE_AUXILIARY_EVERY}-й write-транзакции, чтобы уменьшить
+-- в каждой {WRITE_AUXILIARY_EVERY}-й транзакции записи, чтобы уменьшить
 -- конкуренцию за блокировки на общих строках.
 
 UPDATE pgbench_tellers
@@ -208,7 +208,8 @@ WHERE tid = :tid;
 INSERT INTO pgbench_history (tid, bid, aid, delta, mtime)
 VALUES (:tid, :bid, :aid, :delta, clock_timestamp());
 
-SELECT count(*), sum(delta)
+SELECT sum(delta) AS total_delta,
+       max(mtime) AS last_event_at
 FROM pgbench_history
 WHERE bid = :bid;
 
@@ -239,7 +240,8 @@ INSERT INTO pgbench_history (tid, bid, aid, delta, mtime)
 VALUES (%(tid)s, %(bid)s, %(aid)s, %(delta)s, clock_timestamp())
 """.strip(),
     """
-SELECT count(*), sum(delta)
+SELECT sum(delta) AS total_delta,
+       max(mtime) AS last_event_at
 FROM pgbench_history
 WHERE bid = %(bid)s
 """.strip(),
@@ -248,7 +250,7 @@ WHERE bid = %(bid)s
 PG_LIKE_WRITE_SQL_STMTS = PG_LIKE_WRITE_PRIMARY_SQL_STMTS + PG_LIKE_WRITE_AUXILIARY_SQL_STMTS
 
 PG_LIKE_WRITE_SQL = (
-    "-- Базовая часть: выполняется в каждой write-транзакции.\n"
+    "-- Базовая часть: выполняется в каждой транзакции записи.\n"
     "BEGIN;\n\n"
     + ";\n\n".join(PG_LIKE_WRITE_PRIMARY_SQL_STMTS)
     + ";\n\nCOMMIT;"
@@ -256,7 +258,7 @@ PG_LIKE_WRITE_SQL = (
 
 PG_LIKE_WRITE_AUXILIARY_SQL = (
     f"-- Дополнительная часть: приложение выполняет этот блок примерно в каждой {WRITE_AUXILIARY_EVERY}-й "
-    "write-транзакции.\n"
+    "транзакции записи.\n"
     "BEGIN;\n\n"
     + ";\n\n".join(PG_LIKE_WRITE_AUXILIARY_SQL_STMTS)
     + ";\n\nCOMMIT;"
