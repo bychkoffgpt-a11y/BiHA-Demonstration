@@ -831,6 +831,16 @@ def run_node_action(node: NodeConfig, action: str) -> tuple[bool, str]:
     return ok, output or "OK"
 
 
+def render_pending_service_operation_messages() -> None:
+    pending_messages = st.session_state.pop("pending_service_operation_messages", [])
+    for level, message in pending_messages:
+        notifier = getattr(st, level, None)
+        if callable(notifier):
+            notifier(message)
+        else:
+            st.info(message)
+
+
 def open_reset_counters_dialog(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
     if not st.session_state.get("confirm_reset_counters_inline", False):
         return
@@ -844,7 +854,7 @@ def open_reset_counters_dialog(cluster: ClusterConfig, wg: WorkloadGenerator) ->
             confirm_cols = st.columns(2)
             if confirm_cols[0].button("✅ Да, сбросить", key="confirm_reset_yes", use_container_width=True):
                 wg.reset_stats()
-                reset_server_stats(cluster)
+                st.session_state["pending_service_operation_messages"] = reset_server_stats(cluster)
                 st.session_state["confirm_reset_counters_inline"] = False
                 st.rerun()
             if confirm_cols[1].button("❌ Отмена", key="confirm_reset_no", use_container_width=True):
@@ -861,7 +871,7 @@ def open_reset_counters_dialog(cluster: ClusterConfig, wg: WorkloadGenerator) ->
         confirm_cols = st.columns(2)
         if confirm_cols[0].button("✅ Да, сбросить", key="confirm_reset_yes_dialog", use_container_width=True):
             wg.reset_stats()
-            reset_server_stats(cluster)
+            st.session_state["pending_service_operation_messages"] = reset_server_stats(cluster)
             st.session_state["confirm_reset_counters_inline"] = False
             st.rerun()
         if confirm_cols[1].button("❌ Отмена", key="confirm_reset_no_dialog", use_container_width=True):
@@ -883,7 +893,7 @@ def open_reset_caches_dialog(cluster: ClusterConfig) -> None:
             )
             confirm_cols = st.columns(2)
             if confirm_cols[0].button("✅ Да, очистить кэши", key="confirm_reset_caches_yes", use_container_width=True):
-                reset_all_node_caches(cluster)
+                st.session_state["pending_service_operation_messages"] = reset_all_node_caches(cluster)
                 st.session_state["confirm_reset_caches_inline"] = False
                 st.rerun()
             if confirm_cols[1].button("❌ Отмена", key="confirm_reset_caches_no", use_container_width=True):
@@ -899,7 +909,7 @@ def open_reset_caches_dialog(cluster: ClusterConfig) -> None:
         )
         confirm_cols = st.columns(2)
         if confirm_cols[0].button("✅ Да, очистить кэши", key="confirm_reset_caches_yes_dialog", use_container_width=True):
-            reset_all_node_caches(cluster)
+            st.session_state["pending_service_operation_messages"] = reset_all_node_caches(cluster)
             st.session_state["confirm_reset_caches_inline"] = False
             st.rerun()
         if confirm_cols[1].button("❌ Отмена", key="confirm_reset_caches_no_dialog", use_container_width=True):
@@ -1022,6 +1032,7 @@ def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, A
 
     open_reset_counters_dialog(cluster, wg)
     open_reset_caches_dialog(cluster)
+    render_pending_service_operation_messages()
 
     return {
         "mode": mode,
@@ -1177,7 +1188,7 @@ def render_controls(cluster: ClusterConfig, collector: BackgroundMetricsCollecto
                 st.rerun()
 
 
-def reset_server_stats(cluster: ClusterConfig) -> None:
+def reset_server_stats(cluster: ClusterConfig) -> list[tuple[str, str]]:
     failures: list[str] = []
     notes: list[str] = []
     reset_statements = [
@@ -1203,15 +1214,17 @@ def reset_server_stats(cluster: ClusterConfig) -> None:
         "их значения изменяются только состоянием кластера и активными сессиями."
     )
 
+    messages: list[tuple[str, str]] = []
     if failures:
-        st.warning("Не удалось сбросить статистику (Failed to reset stats): " + "; ".join(failures))
+        messages.append(("warning", "Не удалось сбросить статистику (Failed to reset stats): " + "; ".join(failures)))
     else:
-        st.success("Серверная статистика сброшена (Server statistics reset).")
+        messages.append(("success", "Серверная статистика сброшена (Server statistics reset)."))
     if notes:
-        st.info("Примечания по сбросу (Reset notes): " + " | ".join(notes))
+        messages.append(("info", "Примечания по сбросу (Reset notes): " + " | ".join(notes)))
+    return messages
 
 
-def reset_all_node_caches(cluster: ClusterConfig) -> None:
+def reset_all_node_caches(cluster: ClusterConfig) -> list[tuple[str, str]]:
     failures: list[str] = []
     successes: list[str] = []
 
@@ -1222,10 +1235,12 @@ def reset_all_node_caches(cluster: ClusterConfig) -> None:
         else:
             failures.append(f"{node.name}: {msg}")
 
+    messages: list[tuple[str, str]] = []
     if successes:
-        st.success("Кэши очищены на нодах: " + ", ".join(successes))
+        messages.append(("success", "Кэши очищены на нодах: " + ", ".join(successes)))
     if failures:
-        st.warning("Не удалось очистить кэши: " + "; ".join(failures))
+        messages.append(("warning", "Не удалось очистить кэши: " + "; ".join(failures)))
+    return messages
 
 
 def run_node_action_via_ssh(node: NodeConfig, remote_cmd: str, timeout: int = 15) -> tuple[bool, str]:
