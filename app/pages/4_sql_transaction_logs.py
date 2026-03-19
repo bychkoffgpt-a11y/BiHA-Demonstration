@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from cluster_demo import get_shared_workload_generator
 from ui_styles import apply_base_page_styles
 
 LOG_FILE = Path("logs/biha_demo.log")
@@ -45,6 +46,9 @@ with refresh_col:
         st.rerun()
 
 wg = st.session_state.get("workload_generator")
+if wg is None:
+    wg = get_shared_workload_generator()
+    st.session_state["workload_generator"] = wg
 
 if wg is not None:
     recent_errors = wg.recent_errors_snapshot()
