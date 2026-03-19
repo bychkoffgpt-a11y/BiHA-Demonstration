@@ -197,7 +197,7 @@ streamlit run app/cluster_demo.py --server.headless true
 ### Нижний ряд — цена и устойчивость
 
 4. `CPU primary / standby (%)` — нормализованная загрузка CPU по SSH.
-5. `Disk latency (Primary, мс)` — read/write latency диска primary по SSH (`iostat`).
+5. `Disk IO (Primary, KB/s)` — чтение и запись диска primary в КБ/с по SSH (`iostat`).
 6. `WAL generation rate (MB/s)` — скорость генерации WAL из `pg_stat_wal`.
 7. `Replication lag (с)` — отставание standby по `pg_stat_replication`.
 
