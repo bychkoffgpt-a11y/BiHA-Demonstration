@@ -533,6 +533,7 @@ def fetch_node_metrics(node: NodeConfig, target_db: str) -> dict[str, Any]:
     }
 
     try:
+        track_io_timing: str | None = None
         with psycopg.connect(node.dsn, connect_timeout=2, autocommit=True) as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -560,12 +561,26 @@ def fetch_node_metrics(node: NodeConfig, target_db: str) -> dict[str, Any]:
                             FROM pg_stat_activity
                             WHERE datname = %s AND wait_event_type = 'IO'
                         ),
-                        current_setting('transaction_read_only')
+                        current_setting('transaction_read_only'),
+                        current_setting('track_io_timing', true)
                     """,
-                    (target_db, target_db, target_db, target_db, target_db, target_db, target_db, target_db, target_db, target_db, target_db),
+                    (
+                        target_db,
+                        target_db,
+                        target_db,
+                        target_db,
+                        target_db,
+                        target_db,
+                        target_db,
+                        target_db,
+                        target_db,
+                        target_db,
+                        target_db,
+                    ),
                 )
                 row = cur.fetchone()
                 if row:
+                    track_io_timing = row[14]
                     result.update(
                         {
                             "status": "up",
@@ -588,6 +603,36 @@ def fetch_node_metrics(node: NodeConfig, target_db: str) -> dict[str, Any]:
 
         if node.collect_disk_metrics_via_ssh:
             result.update(fetch_disk_metrics_via_ssh(node))
+
+        LOGGER.info(
+            "Метрики узла для таблицы состояния кластера | %s",
+            json.dumps(
+                {
+                    "node": node.name,
+                    "target_db": target_db,
+                    "status": result["status"],
+                    "role": result["role"],
+                    "track_io_timing": track_io_timing,
+                    "tx_read_only": result["tx_read_only"],
+                    "db_metrics": {
+                        "blk_read_time_ms": result["blk_read_time_ms"],
+                        "blk_write_time_ms": result["blk_write_time_ms"],
+                        "disk_io_queue": result["disk_io_queue"],
+                        "active_queries": result["active_queries"],
+                        "active_locks": result["active_locks"],
+                    },
+                    "os_disk_metrics": {
+                        "collect_via_ssh": node.collect_disk_metrics_via_ssh,
+                        "disk_device": node.disk_device,
+                        "disk_read_kb_s_os": result["disk_read_kb_s_os"],
+                        "disk_write_kb_s_os": result["disk_write_kb_s_os"],
+                        "disk_util_pct_os": result["disk_util_pct_os"],
+                    },
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
     except Exception as exc:
         result["error"] = str(exc)
         LOGGER.exception(
@@ -683,42 +728,68 @@ def fetch_disk_metrics_via_ssh(node: NodeConfig) -> dict[str, float | int | None
         "disk_write_kb_s_os": None,
         "disk_util_pct_os": None,
     }
-    if not node.control_via_ssh or not node.ssh_host:
+
+    def log_and_return_default(reason: str, **details: Any) -> dict[str, float | int | None]:
+        LOGGER.info(
+            "SSH-метрики диска недоступны для таблицы состояния кластера | %s",
+            json.dumps(
+                {
+                    "node": node.name,
+                    "disk_device": node.disk_device,
+                    "reason": reason,
+                    **details,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
         return default_metrics
+
+    if not node.control_via_ssh or not node.ssh_host:
+        return log_and_return_default("ssh_disabled_or_host_missing")
 
     remote_cmd = 'bash -lc "LC_ALL=C iostat -dx 1 2"'
     cmd = build_ssh_command(node, remote_cmd)
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
-    except Exception:
-        return default_metrics
+    except Exception as exc:
+        return log_and_return_default("ssh_command_exception", error=str(exc))
 
     if proc.returncode != 0:
-        return default_metrics
+        return log_and_return_default(
+            "ssh_command_failed",
+            returncode=proc.returncode,
+            stderr=proc.stderr.strip(),
+            stdout=proc.stdout.strip(),
+        )
 
     raw_output = proc.stdout.strip()
     if not raw_output:
-        return default_metrics
+        return log_and_return_default("empty_output")
     sections = [section.strip() for section in raw_output.split("\n\n") if section.strip() and "Device" in section]
     if not sections:
-        return default_metrics
+        return log_and_return_default("device_section_not_found", stdout=raw_output)
 
     lines = [line.strip() for line in sections[-1].splitlines() if line.strip()]
     header_idx = next((idx for idx, line in enumerate(lines) if line.startswith("Device")), None)
     if header_idx is None or header_idx + 1 >= len(lines):
-        return default_metrics
+        return log_and_return_default("header_or_device_rows_missing", stdout=sections[-1])
 
     headers = lines[header_idx].split()
     device_rows = [line.split() for line in lines[header_idx + 1 :] if not line.startswith("avg-cpu")]
     if not device_rows:
-        return default_metrics
+        return log_and_return_default("parsed_device_rows_empty", headers=headers)
 
     if node.disk_device:
         requested_device = node.disk_device.strip()
         requested_aliases = {requested_device, requested_device.removeprefix("/dev/")}
         filtered_rows = [row for row in device_rows if row and row[0] in requested_aliases]
         if not filtered_rows:
-            return default_metrics
+            return log_and_return_default(
+                "configured_device_not_found",
+                requested_device=requested_device,
+                available_devices=[row[0] for row in device_rows if row],
+            )
         device_rows = filtered_rows
 
     totals = {
@@ -773,14 +844,30 @@ def fetch_disk_metrics_via_ssh(node: NodeConfig) -> dict[str, float | int | None
     util = totals["disk_util_pct_os"] if found["disk_util_pct_os"] else None
 
     if read_kb is None and write_kb is None and queue is None and util is None:
-        return default_metrics
+        return log_and_return_default("metrics_not_parsed", headers=headers, rows_used=[row[0] for row in device_rows if row])
 
-    return {
+    parsed_metrics = {
         "disk_read_kb_s_os": read_kb,
         "disk_write_kb_s_os": write_kb,
         "disk_io_queue": queue,
         "disk_util_pct_os": util,
     }
+    LOGGER.info(
+        "SSH-метрики диска для таблицы состояния кластера | %s",
+        json.dumps(
+            {
+                "node": node.name,
+                "disk_device": node.disk_device,
+                "rows_used": [row[0] for row in device_rows if row],
+                "headers": headers,
+                "metrics": parsed_metrics,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+    )
+
+    return parsed_metrics
 
 
 def format_cluster_table_value(value: Any, decimals: int = 2) -> Any:
