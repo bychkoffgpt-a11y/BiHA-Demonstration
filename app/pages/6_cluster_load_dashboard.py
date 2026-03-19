@@ -692,9 +692,6 @@ def theme_chart(chart: alt.Chart) -> alt.Chart:
 
 
 CHART_HEIGHT = 347
-CHART_MIN_SPAN_RATIO = 0.18
-CHART_MIN_SPAN_ABSOLUTE = 1e-6
-CHART_PADDING_RATIO = 0.12
 MAX_WORKLOAD_THREADS = 64
 LOAD_MODE_LABELS = {
     "r-master": "Чтение с master",
@@ -807,81 +804,6 @@ CHART_EXPLANATIONS = {
 }
 
 
-def build_padded_scale(
-    df: pd.DataFrame,
-    *,
-    zero_based: bool = False,
-    clamp_min: float | None = None,
-    clamp_max: float | None = None,
-) -> alt.Scale | None:
-    clean_df = df.dropna(subset=["value"])
-    if clean_df.empty:
-        return None
-
-    min_value = float(clean_df["value"].min())
-    max_value = float(clean_df["value"].max())
-
-    if zero_based:
-        min_value = min(min_value, 0.0)
-
-    span = max_value - min_value
-    base_magnitude = max(abs(max_value), abs(min_value), 1.0)
-    min_span = max(base_magnitude * CHART_MIN_SPAN_RATIO, CHART_MIN_SPAN_ABSOLUTE)
-    if span < min_span:
-        midpoint = (max_value + min_value) / 2
-        min_value = midpoint - min_span / 2
-        max_value = midpoint + min_span / 2
-        span = max_value - min_value
-
-    padding = max(span * CHART_PADDING_RATIO, base_magnitude * 0.02)
-    domain_min = min_value - padding
-    domain_max = max_value + padding
-
-    if zero_based:
-        domain_min = min(domain_min, 0.0)
-
-    if clamp_min is not None:
-        domain_min = max(domain_min, clamp_min)
-    if clamp_max is not None:
-        domain_max = min(domain_max, clamp_max)
-
-    if domain_min >= domain_max:
-        domain_max = domain_min + min_span
-
-    return alt.Scale(domain=[domain_min, domain_max], nice=False, zero=False)
-
-
-def format_metric_value(value: float | int | None, y_title: str) -> str:
-    if value is None or pd.isna(value):
-        return "—"
-    if y_title == "%":
-        return f"{value:.1f}%"
-    if y_title == "мс":
-        return f"{value:.3f} ms"
-    if y_title == "МБ/с":
-        return f"{value:.3f} MB/s"
-    if y_title == "транзакции/с":
-        return f"{value:.2f}/s"
-    return f"{value:.2f} {y_title}".strip()
-
-
-def build_chart_summary(df: pd.DataFrame, color_field: str, y_title: str) -> str | None:
-    clean_df = df.dropna(subset=["value"])
-    if clean_df.empty:
-        return None
-
-    latest_ts = clean_df["timestamp"].max()
-    latest_rows = clean_df[clean_df["timestamp"] == latest_ts]
-    if latest_rows.empty:
-        return None
-
-    parts = [
-        f"{row[color_field]}: {format_metric_value(row['value'], y_title)}"
-        for _, row in latest_rows.sort_values(color_field).iterrows()
-    ]
-    return " · ".join(parts) if parts else None
-
-
 def line_chart(
     df: pd.DataFrame,
     color_field: str,
@@ -897,32 +819,24 @@ def line_chart(
     if clean_df.empty:
         st.info("Недостаточно валидных данных")
         return
-
-    base = alt.Chart(clean_df).encode(
-        x=alt.X("timestamp:T", title=x_title),
-        y=alt.Y("value:Q", title=y_title, scale=y_scale),
-        color=alt.Color(f"{color_field}:N", legend=alt.Legend(title=None), scale=color_scale),
-        tooltip=["timestamp:T", color_field, alt.Tooltip("value:Q", format=".3f")],
-    )
     chart = (
-        alt.layer(
-            base.mark_line(strokeWidth=3.5),
-            base.mark_point(size=120, filled=True, stroke="white", strokeWidth=1.5),
+        alt.Chart(clean_df)
+        .mark_line(strokeWidth=4, point=alt.OverlayMarkDef(size=70, filled=True))
+        .encode(
+            x=alt.X("timestamp:T", title=x_title),
+            y=alt.Y("value:Q", title=y_title, scale=y_scale),
+            color=alt.Color(f"{color_field}:N", legend=alt.Legend(title=None), scale=color_scale),
+            tooltip=["timestamp:T", color_field, alt.Tooltip("value:Q", format=".2f")],
         )
         .properties(height=CHART_HEIGHT)
     )
     st.altair_chart(theme_chart(chart), width="stretch")
 
 
-def render_chart_help(chart_key: str, chart_title: str, chart_summary: str | None = None) -> None:
-    left_col, right_col = st.columns([0.72, 0.28], vertical_alignment="center")
-    with left_col:
-        help_text = CHART_EXPLANATIONS[chart_key]
-        with st.popover(chart_title, help="Нажмите, чтобы посмотреть описание графика", use_container_width=True):
-            st.markdown(help_text)
-    with right_col:
-        if chart_summary:
-            st.caption(f"Сейчас: {chart_summary}")
+def render_chart_help(chart_key: str, chart_title: str) -> None:
+    help_text = CHART_EXPLANATIONS[chart_key]
+    with st.popover(chart_title, help="Нажмите, чтобы посмотреть описание графика", use_container_width=True):
+        st.markdown(help_text)
 
 
 def schedule_ui_refresh(interval_ms: int, key: str) -> None:
@@ -1176,25 +1090,16 @@ def render_dashboard() -> None:
                 st.altair_chart(theme_chart(chart), width="stretch")
 
         def render_tps_chart() -> None:
-            tps_df = series["tps"]
-            render_chart_help("tps", "TPS (транзакции/с)", build_chart_summary(tps_df, "metric", "транзакции/с"))
-            line_chart(tps_df, "metric", "транзакции/с", build_padded_scale(tps_df, zero_based=True, clamp_min=0.0))
+            render_chart_help("tps", "TPS (транзакции/с)")
+            line_chart(series["tps"], "metric", "транзакции/с", alt.Scale(zero=True))
 
         def render_latency_chart() -> None:
-            latency_df = series["latency"]
-            render_chart_help("latency", "Latency p95 (мс)", build_chart_summary(latency_df, "metric", "мс"))
-            line_chart(latency_df, "metric", "мс", build_padded_scale(latency_df))
+            render_chart_help("latency", "Latency p95 (мс)")
+            line_chart(series["latency"], "metric", "мс", alt.Scale(zero=True))
 
         def render_cpu_chart() -> None:
-            cpu_df = series["cpu"]
-            cpu_scale = build_padded_scale(cpu_df, clamp_min=0.0, clamp_max=100.0)
-            if cpu_scale is None:
-                cpu_scale = alt.Scale(domain=[0, 100])
-            clean_cpu_df = cpu_df.dropna(subset=["value"])
-            if not clean_cpu_df.empty and float(clean_cpu_df["value"].max()) >= 35:
-                cpu_scale = alt.Scale(domain=[0, 100])
-            render_chart_help("cpu", "CPU primary / standby (%)", build_chart_summary(cpu_df, "node", "%"))
-            line_chart(cpu_df, "node", "%", cpu_scale)
+            render_chart_help("cpu", "CPU primary / standby (%)")
+            line_chart(series["cpu"], "node", "%", alt.Scale(domain=[0, 100]))
 
         def render_disk_chart() -> None:
             render_chart_help("disk", "Disk IO (Primary, KB/s)")
@@ -1208,9 +1113,8 @@ def render_dashboard() -> None:
             )
 
         def render_wal_chart() -> None:
-            wal_df = series["wal"]
-            render_chart_help("wal", "WAL generation rate (MB/s)", build_chart_summary(wal_df, "metric", "МБ/с"))
-            line_chart(wal_df, "metric", "МБ/с", build_padded_scale(wal_df, clamp_min=0.0))
+            render_chart_help("wal", "WAL generation rate (MB/s)")
+            line_chart(series["wal"], "metric", "МБ/с", alt.Scale(zero=True))
 
         charts: list[Callable[[], None]] = [
             render_tps_chart,
