@@ -700,12 +700,7 @@ def schedule_ui_refresh(interval_ms: int, key: str) -> None:
 
 
 def get_workload_status_snapshot() -> dict[str, Any]:
-    workload_generator = st.session_state.get("workload_generator")
-    persisted_status = normalize_workload_status(
-        read_workload_status(),
-        local_running=bool(workload_generator is not None and getattr(workload_generator, "running", False)),
-        local_session_id=st.session_state.get("workload_session_id"),
-    )
+    persisted_status = normalize_workload_status(read_workload_status())
     is_running = bool(persisted_status.get("is_running"))
 
     mode = str(
