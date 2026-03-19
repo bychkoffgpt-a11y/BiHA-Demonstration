@@ -164,7 +164,7 @@ def fetch_snapshot(primary: NodeConfig, standby: NodeConfig | None, target_db: s
         "timestamp": pd.Timestamp.now(tz="Europe/Moscow"),
         "xact_commit": None,
         "xact_rollback": None,
-        "latency_p95_ms": 0.0,
+        "latency_p95_ms": None,
         "active": 0,
         "idle": 0,
         "idle_xact": 0,
@@ -180,12 +180,67 @@ def fetch_snapshot(primary: NodeConfig, standby: NodeConfig | None, target_db: s
     try:
         with psycopg.connect(primary.dsn, connect_timeout=3, autocommit=True) as conn:
             with conn.cursor() as cur:
-                effective_target_db = resolve_metrics_target_db(cur, target_db)
-                snapshot.update(fetch_transaction_counters(cur, effective_target_db))
-                snapshot.update(fetch_session_metrics(cur))
-                snapshot["wal_bytes"] = fetch_wal_bytes(cur)
-                snapshot["replay_lag_sec"] = fetch_replication_lag(cur)
-                snapshot["latency_p95_ms"] = fetch_latency_p95_ms(cur)
+                cur.execute(
+                    """
+                    SELECT xact_commit, xact_rollback
+                    FROM pg_stat_database
+                    WHERE datname = %s
+                    """,
+                    (target_db,),
+                )
+                row = cur.fetchone()
+                if row:
+                    snapshot["xact_commit"] = int(row[0])
+                    snapshot["xact_rollback"] = int(row[1])
+
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) FILTER (WHERE state = 'active') AS active,
+                        COUNT(*) FILTER (WHERE state = 'idle') AS idle,
+                        COUNT(*) FILTER (WHERE state = 'idle in transaction') AS idle_xact,
+                        COUNT(*) FILTER (WHERE state = 'active' AND wait_event_type IS NOT NULL) AS waiting
+                    FROM pg_stat_activity
+                    WHERE backend_type = 'client backend'
+                    """
+                )
+                row = cur.fetchone()
+                if row:
+                    snapshot["active"] = int(row[0] or 0)
+                    snapshot["idle"] = int(row[1] or 0)
+                    snapshot["idle_xact"] = int(row[2] or 0)
+                    snapshot["waiting"] = int(row[3] or 0)
+
+                cur.execute("SELECT wal_bytes FROM pg_stat_wal")
+                row = cur.fetchone()
+                if row:
+                    snapshot["wal_bytes"] = int(row[0])
+
+                cur.execute(
+                    """
+                    SELECT COALESCE(MAX(EXTRACT(EPOCH FROM replay_lag)), 0)
+                    FROM pg_stat_replication
+                    """
+                )
+                row = cur.fetchone()
+                snapshot["replay_lag_sec"] = float(row[0] or 0)
+
+                if snapshot["latency_p95_ms"] is None:
+                    cur.execute(
+                        """
+                        SELECT
+                            percentile_cont(0.95) WITHIN GROUP (
+                                ORDER BY EXTRACT(EPOCH FROM (clock_timestamp() - query_start)) * 1000.0
+                            )
+                        FROM pg_stat_activity
+                        WHERE backend_type = 'client backend'
+                          AND state = 'active'
+                          AND query_start IS NOT NULL
+                        """
+                    )
+                    row = cur.fetchone()
+                    if row and row[0] is not None:
+                        snapshot["latency_p95_ms"] = float(row[0])
     except Exception:
         LOGGER.exception("Не удалось собрать метрики PostgreSQL для узла=%s", primary.name)
 
@@ -198,141 +253,6 @@ def fetch_snapshot(primary: NodeConfig, standby: NodeConfig | None, target_db: s
     snapshot["disk_write_kb_s"] = disk_metrics["write_kb_s"]
 
     return snapshot
-
-
-def resolve_metrics_target_db(cur: psycopg.Cursor[Any], target_db: str) -> str | None:
-    requested_db = str(target_db).strip()
-    if requested_db:
-        try:
-            cur.execute("SELECT 1 FROM pg_stat_database WHERE datname = %s", (requested_db,))
-            if cur.fetchone():
-                return requested_db
-            LOGGER.warning(
-                "База %s не найдена в pg_stat_database, используем агрегирование по всем пользовательским БД",
-                requested_db,
-            )
-        except Exception:
-            LOGGER.exception("Не удалось проверить наличие БД %s в pg_stat_database", requested_db)
-    return None
-
-
-def fetch_transaction_counters(cur: psycopg.Cursor[Any], target_db: str | None) -> dict[str, int | None]:
-    try:
-        if target_db:
-            cur.execute(
-                """
-                SELECT xact_commit, xact_rollback
-                FROM pg_stat_database
-                WHERE datname = %s
-                """,
-                (target_db,),
-            )
-        else:
-            cur.execute(
-                """
-                SELECT COALESCE(SUM(xact_commit), 0), COALESCE(SUM(xact_rollback), 0)
-                FROM pg_stat_database
-                WHERE datistemplate = false
-                """
-            )
-        row = cur.fetchone()
-        if row:
-            return {
-                "xact_commit": int(row[0] or 0),
-                "xact_rollback": int(row[1] or 0),
-            }
-    except Exception:
-        LOGGER.exception("Не удалось прочитать счётчики транзакций для target_db=%s", target_db)
-    return {"xact_commit": None, "xact_rollback": None}
-
-
-def fetch_session_metrics(cur: psycopg.Cursor[Any]) -> dict[str, int]:
-    try:
-        cur.execute(
-            """
-            SELECT
-                COUNT(*) FILTER (WHERE state = 'active') AS active,
-                COUNT(*) FILTER (WHERE state = 'idle') AS idle,
-                COUNT(*) FILTER (WHERE state = 'idle in transaction') AS idle_xact,
-                COUNT(*) FILTER (WHERE state = 'active' AND wait_event_type IS NOT NULL) AS waiting
-            FROM pg_stat_activity
-            WHERE backend_type = 'client backend'
-            """
-        )
-        row = cur.fetchone()
-        if row:
-            return {
-                "active": int(row[0] or 0),
-                "idle": int(row[1] or 0),
-                "idle_xact": int(row[2] or 0),
-                "waiting": int(row[3] or 0),
-            }
-    except Exception:
-        LOGGER.exception("Не удалось прочитать метрики сессий")
-    return {"active": 0, "idle": 0, "idle_xact": 0, "waiting": 0}
-
-
-def fetch_wal_bytes(cur: psycopg.Cursor[Any]) -> int | None:
-    try:
-        cur.execute("SELECT wal_bytes FROM pg_stat_wal")
-        row = cur.fetchone()
-        if row and row[0] is not None:
-            return int(row[0])
-    except Exception:
-        LOGGER.warning("pg_stat_wal недоступен, пробуем fallback через pg_current_wal_lsn()")
-
-    fallback_queries = [
-        "SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), '0/0')",
-        "SELECT pg_xlog_location_diff(pg_current_xlog_location(), '0/0')",
-    ]
-    for query in fallback_queries:
-        try:
-            cur.execute(query)
-            row = cur.fetchone()
-            if row and row[0] is not None:
-                return int(float(row[0]))
-        except Exception:
-            continue
-
-    LOGGER.error("Не удалось прочитать объём WAL ни через pg_stat_wal, ни через LSN fallback")
-    return None
-
-
-def fetch_replication_lag(cur: psycopg.Cursor[Any]) -> float | None:
-    try:
-        cur.execute(
-            """
-            SELECT COALESCE(MAX(EXTRACT(EPOCH FROM replay_lag)), 0)
-            FROM pg_stat_replication
-            """
-        )
-        row = cur.fetchone()
-        return float(row[0] or 0) if row else 0.0
-    except Exception:
-        LOGGER.exception("Не удалось прочитать lag репликации")
-        return None
-
-
-def fetch_latency_p95_ms(cur: psycopg.Cursor[Any]) -> float:
-    try:
-        cur.execute(
-            """
-            SELECT
-                percentile_cont(0.95) WITHIN GROUP (
-                    ORDER BY EXTRACT(EPOCH FROM (clock_timestamp() - query_start)) * 1000.0
-                )
-            FROM pg_stat_activity
-            WHERE backend_type = 'client backend'
-              AND state = 'active'
-              AND query_start IS NOT NULL
-            """
-        )
-        row = cur.fetchone()
-        if row and row[0] is not None:
-            return float(row[0])
-    except Exception:
-        LOGGER.exception("Не удалось прочитать latency p95")
-    return 0.0
 
 
 def fetch_sessions_snapshot(primary: NodeConfig) -> dict[str, Any]:
@@ -821,7 +741,7 @@ def line_chart(
         return
     chart = (
         alt.Chart(clean_df)
-        .mark_line(strokeWidth=4, point=alt.OverlayMarkDef(size=70, filled=True))
+        .mark_line(strokeWidth=4)
         .encode(
             x=alt.X("timestamp:T", title=x_title),
             y=alt.Y("value:Q", title=y_title, scale=y_scale),
