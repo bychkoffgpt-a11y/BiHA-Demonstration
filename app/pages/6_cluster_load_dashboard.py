@@ -760,7 +760,9 @@ def get_workload_status_snapshot() -> dict[str, Any]:
         "mode_details": mode_details,
         "threads_label": str(total_threads),
         "threads_details": (
-            f"из запрошенных {requested_threads}" if requested_threads > MAX_WORKLOAD_THREADS else "активный профиль"
+            f"реально {total_threads} из настроенных {requested_threads} (лимит: {MAX_WORKLOAD_THREADS})"
+            if requested_threads > MAX_WORKLOAD_THREADS
+            else f"реально {total_threads} из настроенных {requested_threads}"
         ),
     }
 
