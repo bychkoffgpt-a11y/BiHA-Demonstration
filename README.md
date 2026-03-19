@@ -98,7 +98,7 @@ streamlit run app/cluster_demo.py --server.headless true
 - `ssh_port`, `ssh_identity_file`, `ssh_extra_options` помогают стабилизировать SSH-подключение между разными дистрибутивами;
 - `ssh_legacy_algorithms=true` включает совместимость с устаревшими SSH-алгоритмами на старых хостах;
 - если `control_via_ssh=false`, кнопки stop/start/restart для узла не будут работать;
-- `collect_disk_metrics_via_ssh=true` включает сбор метрик диска из ОС через SSH (если `iostat` недоступен, метрики останутся пустыми);
+- `collect_disk_metrics_via_ssh=true` включает сбор метрик диска из ОС через SSH; значения для `Disk read latency, ms`, `Disk write latency, ms`, `Disk queue`, `OS disk read, KB/s`, `OS disk write, KB/s` и `OS disk util, %` берутся из `iostat -dx` (если `iostat` недоступен, эти метрики останутся пустыми);
 - `disk_device` — имя блочного устройства для мониторинга (`/dev/sda`, `sdb`, `nvme0n1` и т.п.); если указано, в таблице `Cluster state` и на всех дисковых графиках будут использоваться только метрики этого устройства.
 
 ---
@@ -278,7 +278,7 @@ streamlit run app/cluster_demo.py --server.headless true
   - текста ошибки;
   - `sqlstate`, `detail`, `hint` (если PostgreSQL их вернул).
 - диагностические снимки метрик для таблицы `Cluster state`:
-  - `Метрики узла для таблицы состояния кластера` — итоговые значения, которые приложение получило для столбцов `Disk read latency, ms`, `Disk write latency, ms`, `Disk queue`, а также состояние `track_io_timing` и сопутствующие метрики;
+  - `Метрики узла для таблицы состояния кластера` — итоговые значения, которые приложение получило для столбцов `Disk read latency, ms`, `Disk write latency, ms`, `Disk queue` и OS-дисковых метрик; при включённом `collect_disk_metrics_via_ssh` дисковые latency/queue/read/write/util берутся из `iostat -dx`;
   - `SSH-метрики диска для таблицы состояния кластера` — распарсенные результаты `iostat -dx` по выбранному устройству;
   - `SSH-метрики диска недоступны для таблицы состояния кластера` — причина, по которой данные по SSH не удалось получить или разобрать.
 
