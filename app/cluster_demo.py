@@ -22,7 +22,12 @@ import streamlit as st
 
 from logging_utils import setup_file_logger
 from ui_styles import apply_base_page_styles
-from workload_status_store import issue_workload_command, read_workload_status, write_workload_status
+from workload_status_store import (
+    issue_workload_command,
+    normalize_workload_status,
+    read_workload_status,
+    write_workload_status,
+)
 from workload_profiles import PgLikeSizing, estimate_pg_like_sizing, run_pg_like_tx
 
 APP_TITLE = "BiHA PostgreSQL Cluster Demo"
@@ -1051,15 +1056,11 @@ def open_reset_caches_dialog(cluster: ClusterConfig) -> None:
 
 def get_shared_workload_state(wg: WorkloadGenerator | None = None) -> dict[str, Any]:
     persisted = read_workload_status()
-    is_running = bool(persisted.get("is_running"))
-    if not is_running and wg is not None and wg.running:
-        is_running = True
-        persisted = {
-            **persisted,
-            "is_running": True,
-            "owner_session_id": persisted.get("owner_session_id") or getattr(wg, "_session_id", None),
-        }
-    return persisted
+    return normalize_workload_status(
+        persisted,
+        local_running=bool(wg is not None and wg.running),
+        local_session_id=getattr(wg, "_session_id", None) if wg is not None else None,
+    )
 
 
 def sync_workload_settings_from_shared_state() -> None:
@@ -1136,7 +1137,7 @@ def issue_shared_workload_request(command: str, session_id: str, profile: dict[s
 
 
 def apply_pending_shared_workload_request(cluster: ClusterConfig, wg: WorkloadGenerator, session_id: str) -> None:
-    status = read_workload_status()
+    status = normalize_workload_status(read_workload_status(), local_running=wg.running, local_session_id=session_id)
     command_id = int(status.get("command_id", 0) or 0)
     last_seen_command_id = int(st.session_state.get("last_seen_workload_command_id", 0))
     if command_id <= 0 or command_id <= last_seen_command_id:
@@ -1144,6 +1145,20 @@ def apply_pending_shared_workload_request(cluster: ClusterConfig, wg: WorkloadGe
 
     command = str(status.get("command") or "").strip().lower()
     owner_session_id = status.get("owner_session_id")
+
+    if command == "stop" and not bool(status.get("is_running")):
+        if wg.running:
+            wg.stop()
+        write_workload_status(
+            {
+                "is_running": False,
+                "owner_session_id": None,
+                "updated_at": pd.Timestamp.now(tz=MOSCOW_TZ).isoformat(),
+            }
+        )
+        st.session_state["last_seen_workload_command_id"] = command_id
+        return
+
     should_process = owner_session_id == session_id or (command == "start" and not bool(status.get("is_running")))
     if not should_process:
         st.session_state["last_seen_workload_command_id"] = command_id
