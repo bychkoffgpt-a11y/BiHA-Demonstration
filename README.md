@@ -44,7 +44,7 @@ cp config/cluster.example.json config/cluster.json
 ### 4) Запуск приложения
 
 ```bash
-streamlit run app/cluster_demo.py
+streamlit run app/cluster_demo.py --server.headless true
 ```
 
 Откройте URL, который покажет Streamlit (обычно `http://localhost:8501`).
