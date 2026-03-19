@@ -21,7 +21,7 @@ except ImportError:
 
 from logging_utils import setup_file_logger
 from ui_styles import apply_base_page_styles
-from workload_status_store import read_workload_status
+from workload_status_store import normalize_workload_status, read_workload_status
 
 LOGGER = setup_file_logger()
 
@@ -700,11 +700,13 @@ def schedule_ui_refresh(interval_ms: int, key: str) -> None:
 
 
 def get_workload_status_snapshot() -> dict[str, Any]:
-    persisted_status = read_workload_status()
     workload_generator = st.session_state.get("workload_generator")
+    persisted_status = normalize_workload_status(
+        read_workload_status(),
+        local_running=bool(workload_generator is not None and getattr(workload_generator, "running", False)),
+        local_session_id=st.session_state.get("workload_session_id"),
+    )
     is_running = bool(persisted_status.get("is_running"))
-    if not is_running and workload_generator is not None:
-        is_running = bool(getattr(workload_generator, "running", False))
 
     mode = str(
         persisted_status.get(

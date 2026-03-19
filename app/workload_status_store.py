@@ -1,11 +1,57 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
 
 STATUS_FILE = Path("logs/workload_status.json")
+WORKLOAD_STATUS_HEARTBEAT_TIMEOUT_SEC = 5
+
+
+def _parse_status_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized_value = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized_value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def normalize_workload_status(
+    status: dict[str, Any],
+    *,
+    local_running: bool = False,
+    local_session_id: str | None = None,
+) -> dict[str, Any]:
+    normalized = dict(status)
+
+    if local_running:
+        normalized["is_running"] = True
+        if local_session_id:
+            normalized["owner_session_id"] = local_session_id
+        return normalized
+
+    if not bool(normalized.get("is_running")):
+        return normalized
+
+    owner_session_id = normalized.get("owner_session_id")
+    updated_at = _parse_status_timestamp(normalized.get("updated_at"))
+    heartbeat_is_fresh = (
+        updated_at is not None
+        and (datetime.now(timezone.utc) - updated_at).total_seconds() <= WORKLOAD_STATUS_HEARTBEAT_TIMEOUT_SEC
+    )
+    if owner_session_id and heartbeat_is_fresh:
+        return normalized
+
+    normalized["is_running"] = False
+    normalized["owner_session_id"] = None
+    return normalized
 
 
 def read_workload_status() -> dict[str, Any]:
