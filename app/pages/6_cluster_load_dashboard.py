@@ -833,6 +833,16 @@ def line_chart(
     st.altair_chart(theme_chart(chart), width="stretch")
 
 
+def cpu_y_scale(df: pd.DataFrame) -> alt.Scale:
+    clean_df = df.dropna(subset=["value"])
+    if clean_df.empty:
+        return alt.Scale(domain=[0, 105])
+
+    max_value = float(clean_df["value"].max())
+    padded_upper_bound = max(105.0, min(120.0, round(max_value + 5.0, 2)))
+    return alt.Scale(domain=[0, padded_upper_bound])
+
+
 def render_chart_help(chart_key: str, chart_title: str) -> None:
     help_text = CHART_EXPLANATIONS[chart_key]
     with st.popover(chart_title, help="Нажмите, чтобы посмотреть описание графика", use_container_width=True):
@@ -1099,7 +1109,7 @@ def render_dashboard() -> None:
 
         def render_cpu_chart() -> None:
             render_chart_help("cpu", "CPU primary / standby (%)")
-            line_chart(series["cpu"], "node", "%", alt.Scale(domain=[0, 100]))
+            line_chart(series["cpu"], "node", "%", cpu_y_scale(series["cpu"]))
 
         def render_disk_chart() -> None:
             render_chart_help("disk", "Disk IO (Primary, KB/s)")
