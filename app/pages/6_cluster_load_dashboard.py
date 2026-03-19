@@ -803,9 +803,12 @@ def render_dashboard() -> None:
             box-shadow: none;
             justify-content: flex-start;
             font-size: 1.05rem;
-            font-weight: 700;
+            font-weight: 800 !important;
             color: #0f172a;
             text-align: left;
+        }
+        div[data-testid="stPopover"] button[kind="secondary"] * {
+            font-weight: 800 !important;
         }
         div[data-testid="stPopover"] button[kind="secondary"]:hover {
             color: #2563eb;
