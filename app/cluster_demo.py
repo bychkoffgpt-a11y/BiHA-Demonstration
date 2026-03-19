@@ -358,7 +358,7 @@ class BackgroundMetricsCollector:
                     **{f"blks_read_{row['node']}": int(row.get("blks_read") or 0) for row in rows},
                     **{f"disk_read_latency_{row['node']}": float(row.get("blk_read_time_ms") or 0.0) for row in rows},
                     **{f"disk_write_latency_{row['node']}": float(row.get("blk_write_time_ms") or 0.0) for row in rows},
-                    **{f"disk_queue_{row['node']}": int(row.get("disk_io_queue") or 0) for row in rows},
+                    **{f"disk_queue_{row['node']}": float(row.get("disk_io_queue") or 0.0) for row in rows},
                     **{f"disk_read_kb_s_{row['node']}": float(row.get("disk_read_kb_s_os") or 0.0) for row in rows},
                     **{f"disk_write_kb_s_{row['node']}": float(row.get("disk_write_kb_s_os") or 0.0) for row in rows},
                     **{f"disk_util_pct_{row['node']}": float(row.get("disk_util_pct_os") or 0.0) for row in rows},
@@ -614,6 +614,7 @@ def fetch_node_metrics(node: NodeConfig, target_db: str) -> dict[str, Any]:
                     "role": result["role"],
                     "track_io_timing": track_io_timing,
                     "tx_read_only": result["tx_read_only"],
+                    "disk_metrics_source": "ssh_iostat" if node.collect_disk_metrics_via_ssh else "postgresql",
                     "db_metrics": {
                         "blk_read_time_ms": result["blk_read_time_ms"],
                         "blk_write_time_ms": result["blk_write_time_ms"],
@@ -723,6 +724,8 @@ def build_ssh_command(node: NodeConfig, remote_cmd: str) -> list[str]:
 
 def fetch_disk_metrics_via_ssh(node: NodeConfig) -> dict[str, float | int | None]:
     default_metrics = {
+        "blk_read_time_ms": None,
+        "blk_write_time_ms": None,
         "disk_io_queue": None,
         "disk_read_kb_s_os": None,
         "disk_write_kb_s_os": None,
@@ -793,12 +796,15 @@ def fetch_disk_metrics_via_ssh(node: NodeConfig) -> dict[str, float | int | None
         device_rows = filtered_rows
 
     totals = {
+        "blk_read_time_ms": 0.0,
+        "blk_write_time_ms": 0.0,
         "disk_read_kb_s_os": 0.0,
         "disk_write_kb_s_os": 0.0,
         "disk_io_queue": 0.0,
         "disk_util_pct_os": 0.0,
     }
     found = {key: False for key in totals}
+    counts = {"blk_read_time_ms": 0, "blk_write_time_ms": 0}
 
     def parse_metric(values_by_header: dict[str, str], candidates: list[str]) -> tuple[float | None, str | None]:
         for candidate in candidates:
@@ -818,6 +824,8 @@ def fetch_disk_metrics_via_ssh(node: NodeConfig) -> dict[str, float | int | None
 
         read_kb, read_key = parse_metric(values_by_header, ["rkB/s", "rKB/s", "kB_read/s", "rMB/s"])
         write_kb, write_key = parse_metric(values_by_header, ["wkB/s", "wKB/s", "kB_wrtn/s", "wMB/s"])
+        read_latency_ms, _ = parse_metric(values_by_header, ["r_await", "await"])
+        write_latency_ms, _ = parse_metric(values_by_header, ["w_await", "await"])
         queue, _ = parse_metric(values_by_header, ["aqu-sz", "avgqu-sz"])
         util, _ = parse_metric(values_by_header, ["%util", "util"])
 
@@ -831,6 +839,14 @@ def fetch_disk_metrics_via_ssh(node: NodeConfig) -> dict[str, float | int | None
                 write_kb *= 1024
             totals["disk_write_kb_s_os"] += write_kb
             found["disk_write_kb_s_os"] = True
+        if read_latency_ms is not None:
+            totals["blk_read_time_ms"] += read_latency_ms
+            found["blk_read_time_ms"] = True
+            counts["blk_read_time_ms"] += 1
+        if write_latency_ms is not None:
+            totals["blk_write_time_ms"] += write_latency_ms
+            found["blk_write_time_ms"] = True
+            counts["blk_write_time_ms"] += 1
         if queue is not None:
             totals["disk_io_queue"] += queue
             found["disk_io_queue"] = True
@@ -838,15 +854,27 @@ def fetch_disk_metrics_via_ssh(node: NodeConfig) -> dict[str, float | int | None
             totals["disk_util_pct_os"] += util
             found["disk_util_pct_os"] = True
 
+    read_latency_ms = (
+        totals["blk_read_time_ms"] / counts["blk_read_time_ms"]
+        if counts["blk_read_time_ms"]
+        else None
+    )
+    write_latency_ms = (
+        totals["blk_write_time_ms"] / counts["blk_write_time_ms"]
+        if counts["blk_write_time_ms"]
+        else None
+    )
     read_kb = totals["disk_read_kb_s_os"] if found["disk_read_kb_s_os"] else None
     write_kb = totals["disk_write_kb_s_os"] if found["disk_write_kb_s_os"] else None
     queue = totals["disk_io_queue"] if found["disk_io_queue"] else None
     util = totals["disk_util_pct_os"] if found["disk_util_pct_os"] else None
 
-    if read_kb is None and write_kb is None and queue is None and util is None:
+    if read_latency_ms is None and write_latency_ms is None and read_kb is None and write_kb is None and queue is None and util is None:
         return log_and_return_default("metrics_not_parsed", headers=headers, rows_used=[row[0] for row in device_rows if row])
 
     parsed_metrics = {
+        "blk_read_time_ms": read_latency_ms,
+        "blk_write_time_ms": write_latency_ms,
         "disk_read_kb_s_os": read_kb,
         "disk_write_kb_s_os": write_kb,
         "disk_io_queue": queue,
@@ -1442,7 +1470,7 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: Bac
     table_height = max(105, min(190, header_height_px + len(localized_df) * row_height_px))
     st.dataframe(localized_df, width="stretch", height=table_height, hide_index=True)
     st.caption(
-        "Data source: PostgreSQL system views (pg_stat_database, pg_stat_activity, pg_locks, pg_last_xact_replay_timestamp) and SSH iostat -dx."
+        "Data source: PostgreSQL system views (pg_stat_database, pg_stat_activity, pg_locks, pg_last_xact_replay_timestamp); disk latency/queue/load columns are filled from SSH iostat -dx when enabled."
     )
     if snap["error"]:
         st.warning(f"Ошибка фонового сборщика метрик: {snap['error']}")
