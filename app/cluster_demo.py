@@ -1097,6 +1097,12 @@ def sync_workload_settings_from_shared_state() -> None:
         st.session_state["load_read_ratio"] = read_ratio
 
 
+def sync_workload_integer_control(source_key: str, target_key: str) -> None:
+    value = int(st.session_state[source_key])
+    st.session_state[target_key] = value
+    st.session_state[f"persist_{target_key}"] = value
+
+
 def issue_shared_workload_request(command: str, session_id: str, profile: dict[str, Any] | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "command_origin_session_id": session_id,
@@ -1216,14 +1222,10 @@ def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, A
         elif key == "load_mode":
             st.session_state[key] = legacy_mode_mapping.get(st.session_state[key], st.session_state[key])
 
-    # Sync exact number inputs to slider-backed values before widgets are instantiated.
-    # Streamlit does not allow changing widget state after the widget with the same key is created.
     for key in ("load_clients", "load_threads_per_client"):
         input_key = f"{key}_input"
         if input_key not in st.session_state:
             st.session_state[input_key] = int(st.session_state[key])
-        elif int(st.session_state[input_key]) != int(st.session_state[key]):
-            st.session_state[key] = int(st.session_state[input_key])
 
     mode = st.sidebar.selectbox(
         "Режим",
@@ -1236,11 +1238,33 @@ def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, A
         ),
         key="load_mode",
     )
-    clients = st.sidebar.slider("Количество клиентов", min_value=1, max_value=64, step=1, key="load_clients")
-    clients = st.sidebar.number_input("Клиенты (точное значение)", min_value=1, max_value=64, step=1, key="load_clients_input", value=int(clients))
+    clients = st.sidebar.slider(
+        "Количество клиентов",
+        min_value=1,
+        max_value=64,
+        step=1,
+        key="load_clients",
+        on_change=sync_workload_integer_control,
+        args=("load_clients", "load_clients_input"),
+    )
+    clients = st.sidebar.number_input(
+        "Клиенты (точное значение)",
+        min_value=1,
+        max_value=64,
+        step=1,
+        key="load_clients_input",
+        on_change=sync_workload_integer_control,
+        args=("load_clients_input", "load_clients"),
+    )
 
     threads_per_client = st.sidebar.slider(
-        "Потоков на клиента", min_value=1, max_value=8, step=1, key="load_threads_per_client"
+        "Потоков на клиента",
+        min_value=1,
+        max_value=8,
+        step=1,
+        key="load_threads_per_client",
+        on_change=sync_workload_integer_control,
+        args=("load_threads_per_client", "load_threads_per_client_input"),
     )
     threads_per_client = st.sidebar.number_input(
         "Потоки на клиента (точное значение)",
@@ -1248,7 +1272,8 @@ def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, A
         max_value=8,
         step=1,
         key="load_threads_per_client_input",
-        value=int(threads_per_client),
+        on_change=sync_workload_integer_control,
+        args=("load_threads_per_client_input", "load_threads_per_client"),
     )
 
     requested_workers = int(clients) * int(threads_per_client)
