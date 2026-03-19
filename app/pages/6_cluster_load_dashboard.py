@@ -914,20 +914,6 @@ def line_chart(
     st.altair_chart(theme_chart(chart), width="stretch")
 
 
-def cpu_y_scale(df: pd.DataFrame) -> alt.Scale:
-    clean_df = df.dropna(subset=["value"])
-    if clean_df.empty:
-        return alt.Scale(domain=[0, 105])
-
-    max_value = float(clean_df["value"].max())
-    padded_upper_bound = max(105.0, min(120.0, round(max_value + 5.0, 2)))
-    return alt.Scale(domain=[0, padded_upper_bound])
-
-
-def render_chart_help(chart_key: str, chart_title: str) -> None:
-    help_text = CHART_EXPLANATIONS[chart_key]
-    with st.popover(chart_title, help="Нажмите, чтобы посмотреть описание графика", use_container_width=True):
-        st.markdown(help_text)
 def render_chart_help(chart_key: str, chart_title: str, chart_summary: str | None = None) -> None:
     left_col, right_col = st.columns([0.72, 0.28], vertical_alignment="center")
     with left_col:
@@ -1200,8 +1186,6 @@ def render_dashboard() -> None:
             line_chart(latency_df, "metric", "мс", build_padded_scale(latency_df))
 
         def render_cpu_chart() -> None:
-            render_chart_help("cpu", "CPU primary / standby (%)")
-            line_chart(series["cpu"], "node", "%", cpu_y_scale(series["cpu"]))
             cpu_df = series["cpu"]
             cpu_scale = build_padded_scale(cpu_df, clamp_min=0.0, clamp_max=100.0)
             if cpu_scale is None:
