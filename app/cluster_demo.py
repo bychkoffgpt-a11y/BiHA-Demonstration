@@ -1079,6 +1079,16 @@ def sync_workload_settings_from_shared_state() -> None:
     if st.session_state.get("last_synced_workload_settings_signature") == shared_signature:
         return
 
+    current_session_id = st.session_state.get("workload_session_id")
+    workload_generator = st.session_state.get("workload_generator")
+    if (
+        current_session_id
+        and persisted.get("owner_session_id") == current_session_id
+        and bool(workload_generator is not None and getattr(workload_generator, "running", False))
+    ):
+        st.session_state["last_synced_workload_settings_signature"] = shared_signature
+        return
+
     legacy_mode_mapping = {
         "single-node": "rw-master",
         "master-rw": "rw-master",
