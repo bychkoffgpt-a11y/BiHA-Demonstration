@@ -1067,6 +1067,17 @@ def sync_workload_settings_from_shared_state() -> None:
     if not persisted:
         return
 
+    shared_signature = {
+        "mode": persisted.get("mode"),
+        "clients": persisted.get("clients"),
+        "threads_per_client": persisted.get("threads_per_client"),
+        "read_ratio": persisted.get("read_ratio"),
+        "command_id": persisted.get("command_id"),
+        "updated_at": persisted.get("updated_at"),
+    }
+    if st.session_state.get("last_synced_workload_settings_signature") == shared_signature:
+        return
+
     legacy_mode_mapping = {
         "single-node": "rw-master",
         "master-rw": "rw-master",
@@ -1095,6 +1106,8 @@ def sync_workload_settings_from_shared_state() -> None:
         read_ratio = float(persisted["read_ratio"])
         st.session_state["persist_load_read_ratio"] = read_ratio
         st.session_state["load_read_ratio"] = read_ratio
+
+    st.session_state["last_synced_workload_settings_signature"] = shared_signature
 
 
 def sync_workload_integer_control(source_key: str, target_key: str) -> None:
