@@ -1318,10 +1318,11 @@ def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, A
     total_workers = min(MAX_WORKERS, requested_workers)
     if requested_workers > MAX_WORKERS:
         st.sidebar.caption(
-            f"Итого рабочих потоков генератора: {total_workers} из {requested_workers} (лимит: {MAX_WORKERS})"
+            "Рабочие потоки генератора: "
+            f"реально={total_workers}, настроено={requested_workers} (лимит: {MAX_WORKERS})"
         )
     else:
-        st.sidebar.caption(f"Итого рабочих потоков генератора: {total_workers}")
+        st.sidebar.caption(f"Рабочие потоки генератора: реально={total_workers}, настроено={requested_workers}")
     read_ratio = st.sidebar.slider("Доля чтения", 0.0, 1.0, step=0.05, key="load_read_ratio")
     if mode in {"r-master", "r-master-r-slave"}:
         st.sidebar.caption("Для профилей только на чтение параметр `Доля чтения` не используется: генератор выполняет только чтение.")
@@ -1684,13 +1685,13 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: Bac
     threads_per_client = int(shared_state.get("threads_per_client", st.session_state.get("load_threads_per_client", 1)))
     requested_workers = int(shared_state.get("requested_threads", clients * threads_per_client))
     actual_workers = min(MAX_WORKERS, requested_workers)
-    workers_caption = f"рабочих потоков={actual_workers}"
+    workers_caption = f"рабочих потоков: реально={actual_workers}, настроено={requested_workers}"
     if requested_workers > MAX_WORKERS:
-        workers_caption += f" из {requested_workers} (лимит: {MAX_WORKERS})"
+        workers_caption += f" (лимит: {MAX_WORKERS})"
 
     st.caption(
-        f"Параметры нагрузки: клиентов={clients}, "
-        f"потоков на клиента={threads_per_client}, "
+        f"Параметры нагрузки: клиентов настроено={clients}, "
+        f"потоков на клиента настроено={threads_per_client}, "
         f"{workers_caption}"
     )
 
