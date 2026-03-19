@@ -259,8 +259,6 @@ class WorkloadGenerator:
             current_mode = self._mode if mode is None else mode
             desired_workers = self._desired_workers
             current_read_ratio = self._read_ratio if read_ratio is None else read_ratio
-            current_cluster = self._cluster
-            current_target_db = get_target_database(current_cluster, current_mode) if current_cluster else None
 
         payload: dict[str, Any] = {
             "is_running": is_running,
@@ -271,8 +269,6 @@ class WorkloadGenerator:
             "requested_threads": desired_workers,
             "updated_at": pd.Timestamp.now(tz=MOSCOW_TZ).isoformat(),
         }
-        if current_target_db:
-            payload["target_db"] = current_target_db
         if payload["clients"] is None:
             payload.pop("clients")
         if payload["threads_per_client"] is None:
@@ -718,25 +714,12 @@ def fetch_disk_metrics_via_ssh(node: NodeConfig) -> dict[str, float | int | None
         return default_metrics
 
     if node.disk_device:
-        requested_device = node.disk_device.strip().removeprefix("/dev/")
-        requested_aliases = {requested_device, f"/dev/{requested_device}"}
-        exact_rows = [row for row in device_rows if row and row[0] in requested_aliases]
-        prefix_rows = [
-            row
-            for row in device_rows
-            if row and (row[0].startswith(requested_device) or row[0].startswith(f"/dev/{requested_device}"))
-        ]
-        physical_rows = [
-            row
-            for row in device_rows
-            if row and not row[0].startswith(("loop", "ram", "sr", "fd", "md127"))
-        ]
-        if exact_rows:
-            device_rows = exact_rows
-        elif prefix_rows:
-            device_rows = prefix_rows
-        else:
-            device_rows = physical_rows or device_rows
+        requested_device = node.disk_device.strip()
+        requested_aliases = {requested_device, requested_device.removeprefix("/dev/")}
+        filtered_rows = [row for row in device_rows if row and row[0] in requested_aliases]
+        if not filtered_rows:
+            return default_metrics
+        device_rows = filtered_rows
 
     totals = {
         "disk_read_kb_s_os": 0.0,
