@@ -8,10 +8,12 @@ import time
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import parse_qs, urlparse
 
 import altair as alt
 import pandas as pd
 import psycopg
+from psycopg.conninfo import conninfo_to_dict
 import streamlit as st
 
 try:
@@ -55,6 +57,53 @@ def load_cluster_config(path: Path) -> ClusterConfig:
     allowed_keys = {field.name for field in fields(NodeConfig)}
     nodes = [NodeConfig(**{k: v for k, v in item.items() if k in allowed_keys}) for item in cfg.get("nodes", [])]
     return ClusterConfig(nodes=nodes)
+
+
+def extract_dbname_from_dsn(dsn: str) -> str:
+    try:
+        conninfo = conninfo_to_dict(dsn)
+    except Exception:
+        conninfo = {}
+    dbname = conninfo.get("dbname")
+    if dbname:
+        return dbname
+    parsed = urlparse(dsn)
+    db_from_path = parsed.path.lstrip("/")
+    if db_from_path:
+        return db_from_path
+    query = parse_qs(parsed.query)
+    return query.get("dbname", ["postgres"])[0]
+
+
+def resolve_cluster_roles(cluster: ClusterConfig) -> tuple[NodeConfig, NodeConfig | None]:
+    resolved_primary: NodeConfig | None = None
+    resolved_standby: NodeConfig | None = None
+
+    for node in cluster.nodes:
+        try:
+            with psycopg.connect(node.dsn, connect_timeout=2, autocommit=True) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT pg_is_in_recovery()")
+                    row = cur.fetchone()
+                    is_in_recovery = bool(row[0]) if row else False
+        except Exception:
+            LOGGER.warning("Не удалось определить фактическую роль узла=%s, используем role_hint", node.name)
+            continue
+
+        if is_in_recovery:
+            resolved_standby = resolved_standby or node
+        else:
+            resolved_primary = node
+
+    primary = resolved_primary or next(
+        (n for n in cluster.nodes if n.role_hint.lower() in {"master", "primary", "leader"}),
+        cluster.nodes[0],
+    )
+    standby = resolved_standby or next(
+        (n for n in cluster.nodes if n is not primary and n.role_hint.lower() in {"slave", "replica", "standby"}),
+        None,
+    )
+    return primary, standby
 
 
 def build_ssh_command(node: NodeConfig, remote_cmd: str) -> list[str]:
@@ -321,8 +370,28 @@ def fetch_disk_io(node: NodeConfig) -> dict[str, float | None]:
     headers = lines[header_idx].split()
     rows = [line.split() for line in lines[header_idx + 1 :] if not line.startswith("avg-cpu")]
     if node.disk_device:
-        aliases = {node.disk_device.strip(), node.disk_device.strip().removeprefix("/dev/")}
-        rows = [row for row in rows if row and row[0] in aliases]
+        requested_device = node.disk_device.strip().removeprefix("/dev/")
+        aliases = {requested_device, f"/dev/{requested_device}"}
+        exact_rows = [row for row in rows if row and row[0] in aliases]
+        prefix_rows = [
+            row for row in rows if row and (row[0].startswith(requested_device) or row[0].startswith(f"/dev/{requested_device}"))
+        ]
+        physical_rows = [
+            row
+            for row in rows
+            if row and not row[0].startswith(("loop", "ram", "sr", "fd", "md127"))
+        ]
+        if exact_rows:
+            rows = exact_rows
+        elif prefix_rows:
+            rows = prefix_rows
+        else:
+            LOGGER.warning(
+                "Не найдено устройство %s в выводе iostat для узла=%s, используем агрегирование по всем дискам",
+                node.disk_device,
+                node.name,
+            )
+            rows = physical_rows or rows
     if not rows:
         return metrics
 
@@ -860,7 +929,7 @@ def render_dashboard() -> None:
         """,
     )
     st.session_state.setdefault("cluster_dashboard_cfg_path", "config/cluster.json")
-    st.session_state.setdefault("cluster_dashboard_target_db", "postgres")
+    st.session_state.setdefault("cluster_dashboard_target_db", "")
     st.session_state.setdefault("cluster_dashboard_auto_refresh", True)
     st.session_state.setdefault("cluster_dashboard_interval_sec", 10)
     st.session_state.setdefault("cluster_dashboard_window_minutes", 30)
@@ -888,10 +957,14 @@ def render_dashboard() -> None:
         st.error("В конфиге не найдено узлов")
         st.stop()
 
-    primary = next((n for n in cluster.nodes if n.role_hint.lower() in {"master", "primary", "leader"}), cluster.nodes[0])
-    standby = next((n for n in cluster.nodes if n.role_hint.lower() in {"slave", "replica", "standby"}), None)
+    primary, standby = resolve_cluster_roles(cluster)
 
-    target_db = st.session_state["cluster_dashboard_target_db"]
+    persisted_status = read_workload_status()
+    default_target_db = str(persisted_status.get("target_db") or extract_dbname_from_dsn(primary.dsn)).strip()
+    target_db = str(st.session_state["cluster_dashboard_target_db"]).strip()
+    if not target_db:
+        target_db = default_target_db
+        st.session_state["cluster_dashboard_target_db"] = default_target_db
     auto_refresh = bool(st.session_state["cluster_dashboard_auto_refresh"])
     interval_sec = int(st.session_state["cluster_dashboard_interval_sec"])
     window_minutes = int(st.session_state["cluster_dashboard_window_minutes"])
