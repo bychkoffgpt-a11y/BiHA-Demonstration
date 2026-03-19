@@ -124,8 +124,8 @@ def fetch_snapshot(primary: NodeConfig, standby: NodeConfig | None, target_db: s
         "replay_lag_sec": None,
         "cpu_primary": None,
         "cpu_standby": None,
-        "disk_read_ms": None,
-        "disk_write_ms": None,
+        "disk_read_kb_s": None,
+        "disk_write_kb_s": None,
     }
 
     try:
@@ -199,9 +199,9 @@ def fetch_snapshot(primary: NodeConfig, standby: NodeConfig | None, target_db: s
     if standby:
         snapshot["cpu_standby"] = fetch_cpu_pct(standby)
 
-    disk_metrics = fetch_disk_latency(primary)
-    snapshot["disk_read_ms"] = disk_metrics["read_ms"]
-    snapshot["disk_write_ms"] = disk_metrics["write_ms"]
+    disk_metrics = fetch_disk_io(primary)
+    snapshot["disk_read_kb_s"] = disk_metrics["read_kb_s"]
+    snapshot["disk_write_kb_s"] = disk_metrics["write_kb_s"]
 
     return snapshot
 
@@ -303,61 +303,59 @@ def fetch_cpu_pct(node: NodeConfig) -> float | None:
     return max(0.0, min(100.0, round(usage, 2)))
 
 
-def fetch_disk_latency(node: NodeConfig) -> dict[str, float | None]:
-    metrics = {"read_ms": None, "write_ms": None}
+def fetch_disk_io(node: NodeConfig) -> dict[str, float | None]:
+    metrics = {"read_kb_s": None, "write_kb_s": None}
     output = run_ssh_metric(node, 'bash -lc "LC_ALL=C iostat -dx 1 2"')
-    if output is not None:
-        sections = [section.strip() for section in output.split("\n\n") if section.strip() and "Device" in section]
-        if sections:
-            lines = [line.strip() for line in sections[-1].splitlines() if line.strip()]
-            header_idx = next((idx for idx, line in enumerate(lines) if line.startswith("Device")), None)
-            if header_idx is not None and header_idx + 1 < len(lines):
-                headers = lines[header_idx].split()
-                rows = [line.split() for line in lines[header_idx + 1 :] if not line.startswith("avg-cpu")]
-                if node.disk_device:
-                    aliases = {node.disk_device.strip(), node.disk_device.strip().removeprefix('/dev/')}
-                    rows = [row for row in rows if row and row[0] in aliases]
-                if rows:
-                    values_by_header = dict(zip(headers[1:], rows[0][1:]))
-                    read_value = values_by_header.get("r_await")
-                    write_value = values_by_header.get("w_await")
-                    try:
-                        metrics["read_ms"] = float(read_value) if read_value is not None else None
-                    except ValueError:
-                        metrics["read_ms"] = None
-                    try:
-                        metrics["write_ms"] = float(write_value) if write_value is not None else None
-                    except ValueError:
-                        metrics["write_ms"] = None
-                    if metrics["read_ms"] is not None or metrics["write_ms"] is not None:
-                        return metrics
+    if output is None:
+        return metrics
 
-    device_filter = "$3 !~ /^(loop|ram|fd)/"
+    sections = [section.strip() for section in output.split("\n\n") if section.strip() and "Device" in section]
+    if not sections:
+        return metrics
+
+    lines = [line.strip() for line in sections[-1].splitlines() if line.strip()]
+    header_idx = next((idx for idx, line in enumerate(lines) if line.startswith("Device")), None)
+    if header_idx is None or header_idx + 1 >= len(lines):
+        return metrics
+
+    headers = lines[header_idx].split()
+    rows = [line.split() for line in lines[header_idx + 1 :] if not line.startswith("avg-cpu")]
     if node.disk_device:
-        disk_name = node.disk_device.strip().removeprefix('/dev/')
-        device_filter = f'$3 == "{disk_name}"'
+        aliases = {node.disk_device.strip(), node.disk_device.strip().removeprefix("/dev/")}
+        rows = [row for row in rows if row and row[0] in aliases]
+    if not rows:
+        return metrics
 
-    fallback_cmd = (
-        "bash -lc \""
-        f"awk '{device_filter} {{r+=$4; rt+=$7; w+=$8; wt+=$11}} END {{print r,rt,w,wt}}' /proc/diskstats; "
-        "sleep 1; "
-        f"awk '{device_filter} {{r+=$4; rt+=$7; w+=$8; wt+=$11}} END {{print r,rt,w,wt}}' /proc/diskstats\""
-    )
-    fallback_output = run_ssh_metric(node, fallback_cmd)
-    if fallback_output is None:
-        return metrics
-    lines = [line.strip() for line in fallback_output.splitlines() if line.strip()]
-    if len(lines) < 2:
-        return metrics
-    try:
-        r1, rt1, w1, wt1 = [float(x) for x in lines[0].split()[:4]]
-        r2, rt2, w2, wt2 = [float(x) for x in lines[1].split()[:4]]
-        dr = max(r2 - r1, 0)
-        dw = max(w2 - w1, 0)
-        metrics["read_ms"] = max(rt2 - rt1, 0) / dr if dr > 0 else 0.0
-        metrics["write_ms"] = max(wt2 - wt1, 0) / dw if dw > 0 else 0.0
-    except (ValueError, IndexError, ZeroDivisionError):
-        return metrics
+    totals = {"read_kb_s": 0.0, "write_kb_s": 0.0}
+    found = {key: False for key in totals}
+
+    def parse_metric(values_by_header: dict[str, str], candidates: list[str]) -> tuple[float | None, str | None]:
+        for candidate in candidates:
+            value = values_by_header.get(candidate)
+            if value is None:
+                continue
+            try:
+                return float(value), candidate
+            except ValueError:
+                continue
+        return None, None
+
+    for row in rows:
+        if len(row) < len(headers):
+            continue
+        values_by_header = dict(zip(headers[1:], row[1:]))
+        read_value, read_key = parse_metric(values_by_header, ["rkB/s", "rKB/s", "kB_read/s", "rMB/s"])
+        write_value, write_key = parse_metric(values_by_header, ["wkB/s", "wKB/s", "kB_wrtn/s", "wMB/s"])
+
+        if read_value is not None:
+            totals["read_kb_s"] += read_value * 1024 if read_key == "rMB/s" else read_value
+            found["read_kb_s"] = True
+        if write_value is not None:
+            totals["write_kb_s"] += write_value * 1024 if write_key == "wMB/s" else write_value
+            found["write_kb_s"] = True
+
+    metrics["read_kb_s"] = totals["read_kb_s"] if found["read_kb_s"] else None
+    metrics["write_kb_s"] = totals["write_kb_s"] if found["write_kb_s"] else None
     return metrics
 
 
@@ -423,8 +421,8 @@ def build_timeseries(history: list[dict[str, Any]], interval_minutes: int) -> di
 
         disk_rows.extend(
             [
-                {"timestamp": ts, "metric": "Read", "value": curr["disk_read_ms"]},
-                {"timestamp": ts, "metric": "Write", "value": curr["disk_write_ms"]},
+                {"timestamp": ts, "metric": "Read", "value": curr["disk_read_kb_s"]},
+                {"timestamp": ts, "metric": "Write", "value": curr["disk_write_kb_s"]},
             ]
         )
 
@@ -623,18 +621,18 @@ CHART_EXPLANATIONS = {
     "disk": """
 **Источник данных**
 - Метрика берётся по SSH только с primary-узла.
-- Основной способ: `iostat -dx 1 2`
-- Резервный способ: расчёт по `/proc/diskstats`
+- Используется команда: `iostat -dx 1 2`
 
-**Как считается latency**
-- При использовании `iostat` берутся поля:
-  - `r_await` → latency чтения
-  - `w_await` → latency записи
-- При fallback-режиме приложение считает среднее время на операцию по дельте счётчиков чтения/записи между двумя замерами.
+**Как считаются точки**
+- Берётся второй срез `iostat`, чтобы исключить накопленные значения с момента старта ОС.
+- Из таблицы устройств читаются поля:
+  - `rkB/s` / `rKB/s` / `kB_read/s` → скорость чтения
+  - `wkB/s` / `wKB/s` / `kB_wrtn/s` → скорость записи
+- Если `iostat` возвращает `rMB/s` или `wMB/s`, приложение переводит их в КБ/с.
 
 **Что показывает график**
-- `Read` — средняя latency чтения диска в миллисекундах
-- `Write` — средняя latency записи диска в миллисекундах
+- `Read` — чтение с диска primary в КБ/с
+- `Write` — запись на диск primary в КБ/с
 
 Если в конфиге задан `disk_device`, график строится именно по этому устройству.
 """.strip(),
@@ -662,6 +660,8 @@ def line_chart(
     color_field: str,
     y_title: str,
     y_scale: alt.Scale | None = None,
+    color_scale: alt.Scale | None = None,
+    x_title: str = "Время",
 ) -> None:
     if df.empty:
         st.info("Недостаточно данных")
@@ -674,9 +674,9 @@ def line_chart(
         alt.Chart(clean_df)
         .mark_line(strokeWidth=4)
         .encode(
-            x=alt.X("timestamp:T", title="Время"),
+            x=alt.X("timestamp:T", title=x_title),
             y=alt.Y("value:Q", title=y_title, scale=y_scale),
-            color=alt.Color(f"{color_field}:N", legend=alt.Legend(title=None)),
+            color=alt.Color(f"{color_field}:N", legend=alt.Legend(title=None), scale=color_scale),
             tooltip=["timestamp:T", color_field, alt.Tooltip("value:Q", format=".2f")],
         )
         .properties(height=CHART_HEIGHT)
@@ -949,8 +949,15 @@ def render_dashboard() -> None:
             line_chart(series["cpu"], "node", "%", alt.Scale(domain=[0, 100]))
 
         def render_disk_chart() -> None:
-            render_chart_help("disk", "Disk latency (Primary, мс)")
-            line_chart(series["disk"], "metric", "мс", alt.Scale(zero=True))
+            render_chart_help("disk", "Disk IO (Primary, KB/s)")
+            line_chart(
+                series["disk"],
+                "metric",
+                "КБ/с",
+                alt.Scale(zero=True),
+                alt.Scale(domain=["Read", "Write"], range=["#2563eb", "#dc2626"]),
+                "время",
+            )
 
         def render_wal_chart() -> None:
             render_chart_help("wal", "WAL generation rate (MB/s)")
