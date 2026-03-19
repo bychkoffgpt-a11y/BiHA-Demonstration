@@ -25,3 +25,21 @@ def write_workload_status(payload: dict[str, Any]) -> None:
         json.dump(current, tmp, ensure_ascii=False)
         tmp.flush()
         Path(tmp.name).replace(STATUS_FILE)
+
+
+def issue_workload_command(command: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    current = read_workload_status()
+    next_command_id = int(current.get("command_id", 0)) + 1
+    current.update(payload or {})
+    current.update(
+        {
+            "command_id": next_command_id,
+            "command": command,
+        }
+    )
+    with NamedTemporaryFile("w", encoding="utf-8", dir=STATUS_FILE.parent, delete=False) as tmp:
+        json.dump(current, tmp, ensure_ascii=False)
+        tmp.flush()
+        Path(tmp.name).replace(STATUS_FILE)
+    return current
