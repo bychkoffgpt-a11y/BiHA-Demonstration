@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from uuid import uuid4
 
 from zoneinfo import ZoneInfo
 
@@ -21,7 +22,7 @@ import streamlit as st
 
 from logging_utils import setup_file_logger
 from ui_styles import apply_base_page_styles
-from workload_status_store import write_workload_status
+from workload_status_store import issue_workload_command, read_workload_status, write_workload_status
 from workload_profiles import PgLikeSizing, estimate_pg_like_sizing, run_pg_like_tx
 
 APP_TITLE = "BiHA PostgreSQL Cluster Demo"
@@ -34,6 +35,7 @@ LOGGER = setup_file_logger()
 WORKLOAD_LOCK_TIMEOUT_MS = 1_500
 WORKLOAD_STATEMENT_TIMEOUT_MS = 8_000
 PG_QUERY_CANCELED_SQLSTATE = "57014"
+WORKLOAD_STATUS_SYNC_KEYS = ("mode", "clients", "threads_per_client", "read_ratio")
 
 
 @dataclass
@@ -67,7 +69,8 @@ class WorkloadGenerator:
         thread: threading.Thread
         stop_event: threading.Event
 
-    def __init__(self) -> None:
+    def __init__(self, session_id: str) -> None:
+        self._session_id = session_id
         self._workers: list[WorkloadGenerator._WorkerSlot] = []
         self._stop_event = threading.Event()
         self._manager_thread: threading.Thread | None = None
@@ -267,6 +270,7 @@ class WorkloadGenerator:
             "threads_per_client": threads_per_client,
             "read_ratio": current_read_ratio,
             "requested_threads": desired_workers,
+            "owner_session_id": self._session_id if is_running else None,
             "updated_at": pd.Timestamp.now(tz=MOSCOW_TZ).isoformat(),
         }
         if payload["clients"] is None:
@@ -1045,20 +1049,139 @@ def open_reset_caches_dialog(cluster: ClusterConfig) -> None:
     _dialog()
 
 
-def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, Any]:
-    st.sidebar.header("Управление нагрузкой")
-    toggle_label = "⏹ Остановить нагрузку" if wg.running else "▶️ Запустить нагрузку"
-    toggle_type = "primary" if wg.running else "secondary"
-    if st.sidebar.button(toggle_label, key="sidebar_toggle_load", use_container_width=True, type=toggle_type):
+def get_shared_workload_state(wg: WorkloadGenerator | None = None) -> dict[str, Any]:
+    persisted = read_workload_status()
+    is_running = bool(persisted.get("is_running"))
+    if not is_running and wg is not None and wg.running:
+        is_running = True
+        persisted = {
+            **persisted,
+            "is_running": True,
+            "owner_session_id": persisted.get("owner_session_id") or getattr(wg, "_session_id", None),
+        }
+    return persisted
+
+
+def sync_workload_settings_from_shared_state() -> None:
+    persisted = read_workload_status()
+    if not persisted:
+        return
+
+    legacy_mode_mapping = {
+        "single-node": "rw-master",
+        "master-rw": "rw-master",
+        "dual-read": "r-master-r-slave",
+        "master-rw-slave-r": "rw-master-r-slave",
+    }
+
+    if "mode" in persisted:
+        mode = legacy_mode_mapping.get(str(persisted["mode"]), str(persisted["mode"]))
+        st.session_state["persist_load_mode"] = mode
+        st.session_state["load_mode"] = mode
+
+    if "clients" in persisted:
+        clients = int(persisted["clients"])
+        st.session_state["persist_load_clients"] = clients
+        st.session_state["load_clients"] = clients
+        st.session_state["load_clients_input"] = clients
+
+    if "threads_per_client" in persisted:
+        threads_per_client = int(persisted["threads_per_client"])
+        st.session_state["persist_load_threads_per_client"] = threads_per_client
+        st.session_state["load_threads_per_client"] = threads_per_client
+        st.session_state["load_threads_per_client_input"] = threads_per_client
+
+    if "read_ratio" in persisted:
+        read_ratio = float(persisted["read_ratio"])
+        st.session_state["persist_load_read_ratio"] = read_ratio
+        st.session_state["load_read_ratio"] = read_ratio
+
+
+def issue_shared_workload_request(command: str, session_id: str, profile: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "command_origin_session_id": session_id,
+        "command_updated_at": pd.Timestamp.now(tz=MOSCOW_TZ).isoformat(),
+    }
+    if profile is not None:
+        requested_threads = int(profile["clients"]) * int(profile["threads_per_client"])
+        payload.update(
+            {
+                "mode": profile["mode"],
+                "clients": int(profile["clients"]),
+                "threads_per_client": int(profile["threads_per_client"]),
+                "read_ratio": float(profile["read_ratio"]),
+                "requested_threads": requested_threads,
+            }
+        )
+    return issue_workload_command(command, payload)
+
+
+def apply_pending_shared_workload_request(cluster: ClusterConfig, wg: WorkloadGenerator, session_id: str) -> None:
+    status = read_workload_status()
+    command_id = int(status.get("command_id", 0) or 0)
+    last_seen_command_id = int(st.session_state.get("last_seen_workload_command_id", 0))
+    if command_id <= 0 or command_id <= last_seen_command_id:
+        return
+
+    command = str(status.get("command") or "").strip().lower()
+    owner_session_id = status.get("owner_session_id")
+    should_process = owner_session_id == session_id or (command == "start" and not bool(status.get("is_running")))
+    if not should_process:
+        st.session_state["last_seen_workload_command_id"] = command_id
+        return
+
+    mode = str(status.get("mode", st.session_state.get("load_mode", "rw-master")))
+    clients = int(status.get("clients", st.session_state.get("load_clients", 10)))
+    threads_per_client = int(status.get("threads_per_client", st.session_state.get("load_threads_per_client", 1)))
+    read_ratio = float(status.get("read_ratio", st.session_state.get("load_read_ratio", 0.7)))
+
+    if command == "start":
+        wg.start(cluster, mode, clients, threads_per_client, read_ratio)
+    elif command == "stop":
         if wg.running:
             wg.stop()
         else:
+            write_workload_status(
+                {
+                    "is_running": False,
+                    "owner_session_id": None,
+                    "updated_at": pd.Timestamp.now(tz=MOSCOW_TZ).isoformat(),
+                }
+            )
+    elif command == "update" and wg.running:
+        wg.update_settings(cluster, mode, clients, threads_per_client, read_ratio)
+
+    st.session_state["last_seen_workload_command_id"] = command_id
+
+
+def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, Any]:
+    session_id = str(st.session_state["workload_session_id"])
+    shared_state = get_shared_workload_state(wg)
+    globally_running = bool(shared_state.get("is_running"))
+    owner_session_id = shared_state.get("owner_session_id")
+
+    st.sidebar.header("Управление нагрузкой")
+    toggle_label = "⏹ Остановить нагрузку" if globally_running else "▶️ Запустить нагрузку"
+    toggle_type = "primary" if globally_running else "secondary"
+    if st.sidebar.button(toggle_label, key="sidebar_toggle_load", use_container_width=True, type=toggle_type):
+        if globally_running:
+            issue_shared_workload_request("stop", session_id)
+            if owner_session_id == session_id and wg.running:
+                wg.stop()
+        else:
+            start_profile = {
+                "mode": st.session_state.get("load_mode", "rw-master"),
+                "clients": int(st.session_state.get("load_clients", 1)),
+                "threads_per_client": int(st.session_state.get("load_threads_per_client", 1)),
+                "read_ratio": float(st.session_state.get("load_read_ratio", 0.7)),
+            }
+            issue_shared_workload_request("start", session_id, start_profile)
             wg.start(
                 cluster,
-                st.session_state.get("load_mode", "rw-master"),
-                int(st.session_state.get("load_clients", 1)),
-                int(st.session_state.get("load_threads_per_client", 1)),
-                float(st.session_state.get("load_read_ratio", 0.7)),
+                start_profile["mode"],
+                start_profile["clients"],
+                start_profile["threads_per_client"],
+                start_profile["read_ratio"],
             )
         st.rerun()
 
@@ -1146,6 +1269,16 @@ def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, A
     st.session_state.persist_load_threads_per_client = int(threads_per_client)
     st.session_state.persist_load_read_ratio = read_ratio
     st.session_state.persist_load_auto_refresh = auto_refresh
+
+    if globally_running and owner_session_id != session_id:
+        current_profile = {
+            "mode": mode,
+            "clients": int(clients),
+            "threads_per_client": int(threads_per_client),
+            "read_ratio": float(read_ratio),
+        }
+        if any(shared_state.get(key) != current_profile[key] for key in WORKLOAD_STATUS_SYNC_KEYS):
+            issue_shared_workload_request("update", session_id, current_profile)
 
     st.sidebar.divider()
     st.sidebar.markdown("#### Сервисные операции")
@@ -1481,10 +1614,12 @@ def render_metrics(cluster: ClusterConfig, wg: WorkloadGenerator, collector: Bac
             {row.get("node"): row.get("error") for row in rows},
         )
         st.warning("Нет подключений к узлам БД. Проверьте доступность PostgreSQL и параметры DSN/SSH в конфиге.")
-    st.info(f"Статус генератора нагрузки (Load generator status): {'🟢 РАБОТАЕТ' if wg.running else '🔴 ОСТАНОВЛЕН'}")
-    clients = int(st.session_state.get("load_clients", 1))
-    threads_per_client = int(st.session_state.get("load_threads_per_client", 1))
-    requested_workers = clients * threads_per_client
+    shared_state = get_shared_workload_state(wg)
+    is_running = bool(shared_state.get("is_running"))
+    st.info(f"Статус генератора нагрузки (Load generator status): {'🟢 РАБОТАЕТ' if is_running else '🔴 ОСТАНОВЛЕН'}")
+    clients = int(shared_state.get("clients", st.session_state.get("load_clients", 1)))
+    threads_per_client = int(shared_state.get("threads_per_client", st.session_state.get("load_threads_per_client", 1)))
+    requested_workers = int(shared_state.get("requested_threads", clients * threads_per_client))
     actual_workers = min(MAX_WORKERS, requested_workers)
     workers_caption = f"рабочих потоков={actual_workers}"
     if requested_workers > MAX_WORKERS:
@@ -1586,22 +1721,28 @@ def main() -> None:
 
     LOGGER.info("App started with config_path=%s nodes=%s", cfg_path, len(cluster.nodes))
 
+    st.session_state.setdefault("workload_session_id", str(uuid4()))
+    sync_workload_settings_from_shared_state()
+
     if "workload_generator" not in st.session_state:
-        st.session_state.workload_generator = WorkloadGenerator()
+        st.session_state.workload_generator = WorkloadGenerator(st.session_state["workload_session_id"])
     if "metrics_collector" not in st.session_state:
         st.session_state.metrics_collector = BackgroundMetricsCollector()
 
     wg: WorkloadGenerator = st.session_state.workload_generator
     collector: BackgroundMetricsCollector = st.session_state.metrics_collector
+    apply_pending_shared_workload_request(cluster, wg, st.session_state["workload_session_id"])
     profile = render_sidebar(cluster, wg)
 
-    wg.update_settings(
-        cluster,
-        profile["mode"],
-        int(profile["clients"]),
-        int(profile["threads_per_client"]),
-        float(profile["read_ratio"]),
-    )
+    shared_state = get_shared_workload_state(wg)
+    if wg.running or shared_state.get("owner_session_id") == st.session_state["workload_session_id"]:
+        wg.update_settings(
+            cluster,
+            profile["mode"],
+            int(profile["clients"]),
+            int(profile["threads_per_client"]),
+            float(profile["read_ratio"]),
+        )
 
     current_signature = build_cluster_signature(cluster)
     if collector.cluster_signature != current_signature or not collector.running:
