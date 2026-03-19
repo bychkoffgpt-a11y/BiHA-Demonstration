@@ -858,6 +858,21 @@ def render_pending_service_operation_messages() -> None:
             st.info(message)
 
 
+def request_reset_caches() -> None:
+    st.session_state["confirm_reset_caches_inline"] = False
+    st.session_state["pending_reset_caches_action"] = True
+    st.rerun()
+
+
+def run_pending_service_operations(cluster: ClusterConfig) -> None:
+    if st.session_state.pop("pending_reset_caches_action", False):
+        with st.spinner("Очищаем page cache/dentries/inodes на нодах кластера..."):
+            messages = reset_all_node_caches(cluster)
+        if not messages:
+            messages = [("info", "Очистка кэшей завершена, но узлы для обработки не найдены.")]
+        st.session_state["pending_service_operation_messages"] = messages
+
+
 def open_reset_counters_dialog(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
     if not st.session_state.get("confirm_reset_counters_inline", False):
         return
@@ -910,9 +925,7 @@ def open_reset_caches_dialog(cluster: ClusterConfig) -> None:
             )
             confirm_cols = st.columns(2)
             if confirm_cols[0].button("✅ Да, очистить кэши", key="confirm_reset_caches_yes", use_container_width=True):
-                st.session_state["pending_service_operation_messages"] = reset_all_node_caches(cluster)
-                st.session_state["confirm_reset_caches_inline"] = False
-                st.rerun()
+                request_reset_caches()
             if confirm_cols[1].button("❌ Отмена", key="confirm_reset_caches_no", use_container_width=True):
                 st.session_state["confirm_reset_caches_inline"] = False
                 st.rerun()
@@ -926,9 +939,7 @@ def open_reset_caches_dialog(cluster: ClusterConfig) -> None:
         )
         confirm_cols = st.columns(2)
         if confirm_cols[0].button("✅ Да, очистить кэши", key="confirm_reset_caches_yes_dialog", use_container_width=True):
-            st.session_state["pending_service_operation_messages"] = reset_all_node_caches(cluster)
-            st.session_state["confirm_reset_caches_inline"] = False
-            st.rerun()
+            request_reset_caches()
         if confirm_cols[1].button("❌ Отмена", key="confirm_reset_caches_no_dialog", use_container_width=True):
             st.session_state["confirm_reset_caches_inline"] = False
             st.rerun()
@@ -1049,6 +1060,7 @@ def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, A
 
     open_reset_counters_dialog(cluster, wg)
     open_reset_caches_dialog(cluster)
+    run_pending_service_operations(cluster)
     render_pending_service_operation_messages()
 
     return {
