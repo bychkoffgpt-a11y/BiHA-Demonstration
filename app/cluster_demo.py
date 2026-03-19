@@ -30,7 +30,7 @@ from workload_status_store import (
 )
 from workload_profiles import PgLikeSizing, estimate_pg_like_sizing, run_pg_like_tx
 
-APP_TITLE = "BiHA PostgreSQL Cluster Demo"
+APP_TITLE = "Демонстрация кластера PostgreSQL BiHA"
 DEFAULT_HISTORY = 120
 DEFAULT_WORKLOAD_DB_SIZE_GB = 1.0
 MAX_WORKERS = 64
@@ -1718,7 +1718,7 @@ def render_metrics(
                 localized_df[column] = localized_df[column].map(format_cluster_table_value)
         if "Error" in localized_df.columns:
             localized_df["Error"] = localized_df["Error"].fillna("")
-    metrics_meta = f"Целевая БД нагрузки (Target DB): {target_db}"
+    metrics_meta = f"Целевая база данных для нагрузки: {target_db}"
     if snap["updated_at"] is not None:
         metrics_meta += f" | Последнее обновление метрик: {snap['updated_at'].strftime('%H:%M:%S')}"
     st.caption(metrics_meta)
@@ -1727,7 +1727,7 @@ def render_metrics(
     table_height = max(105, min(190, header_height_px + len(localized_df) * row_height_px))
     st.dataframe(localized_df, width="stretch", height=table_height, hide_index=True)
     st.caption(
-        "Data source: PostgreSQL system views (pg_stat_database, pg_stat_activity, pg_locks, pg_last_xact_replay_timestamp); disk latency/queue/load columns are filled from SSH iostat -dx when enabled."
+        "Источник данных: системные представления PostgreSQL (pg_stat_database, pg_stat_activity, pg_locks, pg_last_xact_replay_timestamp); столбцы с задержками, очередью и нагрузкой на диск заполняются по данным SSH-команды iostat -dx, если этот сбор включён."
     )
     if snap["error"]:
         st.warning(f"Ошибка фонового сборщика метрик: {snap['error']}")
@@ -1745,7 +1745,7 @@ def render_metrics(
     desired_status = "🟢 ЗАПУСК ЗАПРОШЕН" if desired_is_running else "🔴 ОСТАНОВКА ЗАПРОШЕНА"
     runtime_status = "🟢 РАБОТАЕТ" if is_running else "🔴 ОСТАНОВЛЕН"
     st.info(
-        "Статус генератора нагрузки (Load generator status): "
+        "Статус генератора нагрузки: "
         f"{runtime_status} | Желаемое состояние: {desired_status}"
     )
     clients = int(shared_state.get("clients", st.session_state.get("load_clients", 1)))
@@ -1765,7 +1765,7 @@ def render_metrics(
     if last_error:
         st.warning(f"Последняя ошибка применения общего состояния нагрузки: {last_error}")
 
-    st.subheader("Статистика нагрузки (Load stats)")
+    st.subheader("Статистика нагрузки")
 
     recent_errors = wg.recent_errors_snapshot()
     if recent_errors:
@@ -1780,17 +1780,17 @@ def render_metrics(
         chart_cols = st.columns(3)
 
         with chart_cols[0]:
-            st.caption("Запросы и ошибки (Queries and errors)")
+            st.caption("Запросы и ошибки")
             st.line_chart(query_error_moment_df, height=320)
             st.caption("Источник данных: генератор нагрузки (счётчики read_tx, write_tx, errors; на графике показана разница между соседними срезами).")
 
         with chart_cols[1]:
-            st.caption("Блокировки и активные запросы (Locks and active queries)")
+            st.caption("Блокировки и активные запросы")
             st.line_chart(chart_df[["active_locks", "active_queries"]], height=320)
-            st.caption("Источник данных: PostgreSQL system views pg_locks и pg_stat_activity.")
+            st.caption("Источник данных: системные представления PostgreSQL pg_locks и pg_stat_activity.")
 
         with chart_cols[2]:
-            st.caption("Нагрузка на диски по узлам (Disk load per node)")
+            st.caption("Нагрузка на диски по узлам")
             role_aliases = {
                 "master": {"master", "primary", "leader"},
                 "slave": {"slave", "replica", "standby"},
@@ -1835,22 +1835,22 @@ def main() -> None:
     st.session_state.setdefault("cfg_path", "config/cluster.json")
     raw_cfg_path = str(st.session_state["cfg_path"]).strip()
     if not raw_cfg_path:
-        st.error("Укажите путь к конфигу (Provide a path to the config file).")
+        st.error("Укажите путь к конфигурационному файлу.")
         st.stop()
 
     cfg_path = Path(raw_cfg_path)
     if not cfg_path.exists():
-        st.error(f"Конфиг не найден (Config not found): {cfg_path}")
+        st.error(f"Конфигурационный файл не найден: {cfg_path}")
         st.stop()
     if not cfg_path.is_file():
-        st.error(f"Ожидался JSON-файл конфига, но указан каталог (Expected a JSON config file, got a directory): {cfg_path}")
+        st.error(f"Ожидался JSON-файл конфигурации, но указан каталог: {cfg_path}")
         st.stop()
 
     try:
         cluster = load_cluster_config(cfg_path)
     except Exception as exc:
         LOGGER.exception("Failed to parse config file: %s", cfg_path)
-        st.error(f"Не удалось прочитать конфиг (Cannot parse config): {exc}")
+        st.error(f"Не удалось прочитать конфигурационный файл: {exc}")
         st.stop()
 
     LOGGER.info("App started with config_path=%s nodes=%s", cfg_path, len(cluster.nodes))
@@ -1889,9 +1889,9 @@ def main() -> None:
     render_metrics(cluster, wg, collector, shared_state)
 
     st.divider()
-    st.text_input("Путь к конфигу (Path to config)", key="cfg_path")
+    st.text_input("Путь к конфигурационному файлу", key="cfg_path")
 
-    if st.button("🔄 Refresh", key="scenario_refresh_now", help="Refresh now", use_container_width=True):
+    if st.button("🔄 Обновить", key="scenario_refresh_now", help="Немедленно обновить данные", use_container_width=True):
         st.rerun()
 
     if profile["auto_refresh"]:
