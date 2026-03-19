@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import random
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -10,7 +11,11 @@ from typing import Callable
 
 import psycopg
 
+READ_AUXILIARY_EVERY = 4
 WRITE_AUXILIARY_EVERY = 4
+
+_READ_TX_COUNTER = 0
+_READ_TX_COUNTER_LOCK = threading.Lock()
 
 PG_LIKE_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS pgbench_accounts (
@@ -68,11 +73,20 @@ SELECT gs, ((gs - 1) / %(accounts_per_branch)s)::int + 1, 0
 FROM generate_series(%(id_from)s, %(id_to)s) AS gs;
 """.strip()
 
-PG_LIKE_READ_SCRIPT_SQL = r"""
+PG_LIKE_READ_PRIMARY_SCRIPT_SQL = r"""
+\set aid random(1, :scale * 100000)
+
+SELECT abalance
+FROM pgbench_accounts
+WHERE aid = :aid;
+""".strip()
+
+PG_LIKE_READ_AUXILIARY_SCRIPT_SQL = rf"""
 \set aid random(1, :scale * 100000)
 \set bid random(1, :scale)
 \set tid random(1, :scale * 10)
 
+-- Дополнительная часть: приложение выполняет этот блок в каждой {READ_AUXILIARY_EVERY}-й транзакции чтения.
 SELECT abalance, bid
 FROM pgbench_accounts
 WHERE aid = :aid;
@@ -99,7 +113,15 @@ ORDER BY abalance DESC
 LIMIT 20;
 """.strip()
 
-PG_LIKE_READ_SQL_STMTS = (
+PG_LIKE_READ_PRIMARY_SQL_STMTS = (
+    """
+SELECT abalance
+FROM pgbench_accounts
+WHERE aid = %(aid)s
+""".strip(),
+)
+
+PG_LIKE_READ_AUXILIARY_SQL_STMTS = (
     """
 SELECT abalance, bid
 FROM pgbench_accounts
@@ -131,7 +153,21 @@ LIMIT 20
 """.strip(),
 )
 
-PG_LIKE_READ_SQL = ";\n\n".join(PG_LIKE_READ_SQL_STMTS) + ";"
+PG_LIKE_READ_SQL_STMTS = PG_LIKE_READ_PRIMARY_SQL_STMTS + PG_LIKE_READ_AUXILIARY_SQL_STMTS
+
+PG_LIKE_READ_PRIMARY_SQL = ";\n\n".join(PG_LIKE_READ_PRIMARY_SQL_STMTS) + ";"
+PG_LIKE_READ_AUXILIARY_SQL = (
+    f"-- Дополнительная часть: приложение выполняет этот блок в каждой {READ_AUXILIARY_EVERY}-й "
+    "транзакции чтения.\n"
+    + ";\n\n".join(PG_LIKE_READ_AUXILIARY_SQL_STMTS)
+    + ";"
+)
+PG_LIKE_READ_SQL = (
+    "-- Полный набор SQL-команд профиля чтения. Приложение выполняет базовую часть в 3 из 4 "
+    "транзакций чтения и дополнительную часть в 1 из 4 транзакций чтения.\n"
+    + ";\n\n".join(PG_LIKE_READ_SQL_STMTS)
+    + ";"
+)
 
 PG_LIKE_WRITE_SCRIPT_SQL = r"""
 \set bid random(1, :scale)
@@ -253,6 +289,13 @@ def estimate_pg_like_sizing(target_size_gb: float, fillfactor: float = 1.25) -> 
         tellers_per_branch=10,
         accounts_per_branch=100000,
     )
+
+
+def _use_read_auxiliary() -> bool:
+    global _READ_TX_COUNTER
+    with _READ_TX_COUNTER_LOCK:
+        _READ_TX_COUNTER = (_READ_TX_COUNTER + 1) % READ_AUXILIARY_EVERY
+        return _READ_TX_COUNTER == 0
 
 
 def _normalized_worker_count(worker_count: int | None) -> int:
@@ -398,5 +441,8 @@ def run_pg_like_tx(conn: psycopg.Connection, write_tx: bool, sizing: PgLikeSizin
                 "bid": random.randint(1, sizing.branch_count),
                 "tid": random.randint(1, sizing.teller_count),
             }
-            for statement in PG_LIKE_READ_SQL_STMTS:
+            read_statements = PG_LIKE_READ_PRIMARY_SQL_STMTS
+            if _use_read_auxiliary():
+                read_statements = PG_LIKE_READ_AUXILIARY_SQL_STMTS
+            for statement in read_statements:
                 cur.execute(statement, params)
