@@ -832,22 +832,24 @@ def run_node_action(node: NodeConfig, action: str) -> tuple[bool, str]:
 
 
 def open_reset_counters_dialog(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
+    if not st.session_state.get("confirm_reset_counters_inline", False):
+        return
+
     if not hasattr(st, "dialog"):
-        if st.session_state.get("confirm_reset_counters_inline", False):
-            with st.sidebar.container(border=True):
-                st.warning(
-                    "Подтвердите сброс серверной статистики на всех узлах кластера. "
-                    "Будут предприняты попытки очистки счётчиков pg_stat_database и связанных shared статистик."
-                )
-                confirm_cols = st.columns(2)
-                if confirm_cols[0].button("✅ Да, сбросить", key="confirm_reset_yes", use_container_width=True):
-                    wg.reset_stats()
-                    reset_server_stats(cluster)
-                    st.session_state["confirm_reset_counters_inline"] = False
-                    st.rerun()
-                if confirm_cols[1].button("❌ Отмена", key="confirm_reset_no", use_container_width=True):
-                    st.session_state["confirm_reset_counters_inline"] = False
-                    st.rerun()
+        with st.sidebar.container(border=True):
+            st.warning(
+                "Подтвердите сброс серверной статистики на всех узлах кластера. "
+                "Будут предприняты попытки очистки счётчиков pg_stat_database и связанных shared статистик."
+            )
+            confirm_cols = st.columns(2)
+            if confirm_cols[0].button("✅ Да, сбросить", key="confirm_reset_yes", use_container_width=True):
+                wg.reset_stats()
+                reset_server_stats(cluster)
+                st.session_state["confirm_reset_counters_inline"] = False
+                st.rerun()
+            if confirm_cols[1].button("❌ Отмена", key="confirm_reset_no", use_container_width=True):
+                st.session_state["confirm_reset_counters_inline"] = False
+                st.rerun()
         return
 
     @st.dialog("Сбросить счётчики?")
@@ -860,29 +862,33 @@ def open_reset_counters_dialog(cluster: ClusterConfig, wg: WorkloadGenerator) ->
         if confirm_cols[0].button("✅ Да, сбросить", key="confirm_reset_yes_dialog", use_container_width=True):
             wg.reset_stats()
             reset_server_stats(cluster)
+            st.session_state["confirm_reset_counters_inline"] = False
             st.rerun()
         if confirm_cols[1].button("❌ Отмена", key="confirm_reset_no_dialog", use_container_width=True):
+            st.session_state["confirm_reset_counters_inline"] = False
             st.rerun()
 
     _dialog()
 
 
 def open_reset_caches_dialog(cluster: ClusterConfig) -> None:
+    if not st.session_state.get("confirm_reset_caches_inline", False):
+        return
+
     if not hasattr(st, "dialog"):
-        if st.session_state.get("confirm_reset_caches_inline", False):
-            with st.sidebar.container(border=True):
-                st.warning(
-                    "Подтвердите очистку page cache/dentries/inodes на всех нодах кластера. "
-                    "Операция требует sudo без пароля и может временно ухудшить производительность."
-                )
-                confirm_cols = st.columns(2)
-                if confirm_cols[0].button("✅ Да, очистить кэши", key="confirm_reset_caches_yes", use_container_width=True):
-                    reset_all_node_caches(cluster)
-                    st.session_state["confirm_reset_caches_inline"] = False
-                    st.rerun()
-                if confirm_cols[1].button("❌ Отмена", key="confirm_reset_caches_no", use_container_width=True):
-                    st.session_state["confirm_reset_caches_inline"] = False
-                    st.rerun()
+        with st.sidebar.container(border=True):
+            st.warning(
+                "Подтвердите очистку page cache/dentries/inodes на всех нодах кластера. "
+                "Операция требует sudo без пароля и может временно ухудшить производительность."
+            )
+            confirm_cols = st.columns(2)
+            if confirm_cols[0].button("✅ Да, очистить кэши", key="confirm_reset_caches_yes", use_container_width=True):
+                reset_all_node_caches(cluster)
+                st.session_state["confirm_reset_caches_inline"] = False
+                st.rerun()
+            if confirm_cols[1].button("❌ Отмена", key="confirm_reset_caches_no", use_container_width=True):
+                st.session_state["confirm_reset_caches_inline"] = False
+                st.rerun()
         return
 
     @st.dialog("Очистить кэши?")
@@ -894,8 +900,10 @@ def open_reset_caches_dialog(cluster: ClusterConfig) -> None:
         confirm_cols = st.columns(2)
         if confirm_cols[0].button("✅ Да, очистить кэши", key="confirm_reset_caches_yes_dialog", use_container_width=True):
             reset_all_node_caches(cluster)
+            st.session_state["confirm_reset_caches_inline"] = False
             st.rerun()
         if confirm_cols[1].button("❌ Отмена", key="confirm_reset_caches_no_dialog", use_container_width=True):
+            st.session_state["confirm_reset_caches_inline"] = False
             st.rerun()
 
     _dialog()
@@ -1006,22 +1014,14 @@ def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, A
     st.sidebar.divider()
     st.sidebar.markdown("#### Сервисные операции")
     if st.sidebar.button("🔄 Сбросить счётчики", use_container_width=True, key="sidebar_reset_counters"):
-        if hasattr(st, "dialog"):
-            open_reset_counters_dialog(cluster, wg)
-        else:
-            st.session_state["confirm_reset_counters_inline"] = True
-            st.rerun()
+        st.session_state["confirm_reset_counters_inline"] = True
+        st.rerun()
     if st.sidebar.button("🧹 Сбросить кэши", use_container_width=True, key="sidebar_reset_caches"):
-        if hasattr(st, "dialog"):
-            open_reset_caches_dialog(cluster)
-        else:
-            st.session_state["confirm_reset_caches_inline"] = True
-            st.rerun()
+        st.session_state["confirm_reset_caches_inline"] = True
+        st.rerun()
 
-    if st.session_state.get("confirm_reset_counters_inline", False):
-        open_reset_counters_dialog(cluster, wg)
-    if st.session_state.get("confirm_reset_caches_inline", False):
-        open_reset_caches_dialog(cluster)
+    open_reset_counters_dialog(cluster, wg)
+    open_reset_caches_dialog(cluster)
 
     return {
         "mode": mode,
