@@ -274,6 +274,10 @@ streamlit run app/cluster_demo.py --server.headless true
   - типа транзакции (`read`/`write`);
   - текста ошибки;
   - `sqlstate`, `detail`, `hint` (если PostgreSQL их вернул).
+- диагностические снимки метрик для таблицы `Cluster state`:
+  - `Метрики узла для таблицы состояния кластера` — итоговые значения, которые приложение получило для столбцов `Disk read latency, ms`, `Disk write latency, ms`, `Disk queue`, а также состояние `track_io_timing` и сопутствующие метрики;
+  - `SSH-метрики диска для таблицы состояния кластера` — распарсенные результаты `iostat -dx` по выбранному устройству;
+  - `SSH-метрики диска недоступны для таблицы состояния кластера` — причина, по которой данные по SSH не удалось получить или разобрать.
 
 Если ошибка проявилась только в UI (например, рост счётчика ошибок), детали SQL-причины берите из `logs/biha_demo.log`.
 
@@ -291,6 +295,9 @@ rg "SSH check|SSH action|SSH command timeout" logs/biha_demo.log
 
 # только SQL/БД-ошибки
 rg "DB metrics fetch failed|Workload transaction failed|sqlstate=" logs/biha_demo.log
+
+# только диагностика значений для проблемных столбцов Cluster state
+rg "Метрики узла для таблицы состояния кластера|SSH-метрики диска" logs/biha_demo.log
 ```
 
 ---
