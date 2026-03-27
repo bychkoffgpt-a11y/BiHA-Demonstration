@@ -13,7 +13,7 @@ STATUS_FILE = Path("logs/workload_status.json")
 STATUS_LOCK_FILE = Path("logs/workload_status.lock")
 DEFAULT_DESIRED_STATE = {
     "is_running": False,
-    "mode": "rw-master",
+    "mode": "rw",
     "clients": 10,
     "threads_per_client": 1,
     "read_ratio": 0.7,

@@ -30,7 +30,6 @@ LOGGER = setup_file_logger()
 class NodeConfig:
     name: str
     dsn: str
-    role_hint: str = "unknown"
     control_via_ssh: bool = False
     ssh_host: str | None = None
     ssh_user: str | None = None
@@ -44,6 +43,7 @@ class NodeConfig:
 @dataclass
 class ClusterConfig:
     nodes: list[NodeConfig]
+    vip_dsn: str
 
 
 def load_cluster_config(path: Path) -> ClusterConfig:
@@ -54,7 +54,10 @@ def load_cluster_config(path: Path) -> ClusterConfig:
     cfg = json.loads(path.read_text(encoding="utf-8"))
     allowed_keys = {field.name for field in fields(NodeConfig)}
     nodes = [NodeConfig(**{k: v for k, v in item.items() if k in allowed_keys}) for item in cfg.get("nodes", [])]
-    return ClusterConfig(nodes=nodes)
+    vip_dsn = cfg.get("vip_dsn")
+    if not vip_dsn:
+        raise ValueError("В конфиге должен быть указан vip_dsn")
+    return ClusterConfig(nodes=nodes, vip_dsn=str(vip_dsn))
 
 
 def build_ssh_command(node: NodeConfig, remote_cmd: str) -> list[str]:
@@ -110,7 +113,24 @@ def run_ssh_metric(node: NodeConfig, remote_cmd: str, timeout_sec: int = 8) -> s
     return output or None
 
 
-def fetch_snapshot(primary: NodeConfig, standby: NodeConfig | None, target_db: str) -> dict[str, Any]:
+def detect_node_role(node: NodeConfig) -> str:
+    try:
+        with psycopg.connect(node.dsn, connect_timeout=2, autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT CASE WHEN pg_is_in_recovery() THEN 'slave' ELSE 'master' END")
+                row = cur.fetchone()
+                if row and row[0]:
+                    return str(row[0]).lower()
+    except Exception:
+        LOGGER.exception("Не удалось определить роль узла=%s", node.name)
+    return "unknown"
+
+
+def fetch_snapshot(cluster: ClusterConfig, target_db: str) -> dict[str, Any]:
+    role_by_node = {node.name: detect_node_role(node) for node in cluster.nodes}
+    master_node = next((n for n in cluster.nodes if role_by_node.get(n.name) == "master"), None)
+    slave_node = next((n for n in cluster.nodes if role_by_node.get(n.name) == "slave"), None)
+
     snapshot: dict[str, Any] = {
         "timestamp": pd.Timestamp.now(tz="Europe/Moscow"),
         "xact_commit": None,
@@ -122,14 +142,16 @@ def fetch_snapshot(primary: NodeConfig, standby: NodeConfig | None, target_db: s
         "waiting": 0,
         "wal_bytes": None,
         "replay_lag_sec": None,
-        "cpu_primary": None,
-        "cpu_standby": None,
+        "cpu_master": None,
+        "cpu_slave": None,
         "disk_read_ms": None,
         "disk_write_ms": None,
+        "master_node_name": master_node.name if master_node else None,
+        "slave_node_name": slave_node.name if slave_node else None,
     }
 
     try:
-        with psycopg.connect(primary.dsn, connect_timeout=3, autocommit=True) as conn:
+        with psycopg.connect(cluster.vip_dsn, connect_timeout=3, autocommit=True) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -193,13 +215,15 @@ def fetch_snapshot(primary: NodeConfig, standby: NodeConfig | None, target_db: s
                     if row and row[0] is not None:
                         snapshot["latency_p95_ms"] = float(row[0])
     except Exception:
-        LOGGER.exception("Не удалось собрать метрики PostgreSQL для узла=%s", primary.name)
+        LOGGER.exception("Не удалось собрать метрики PostgreSQL через VIP")
 
-    snapshot["cpu_primary"] = fetch_cpu_pct(primary)
-    if standby:
-        snapshot["cpu_standby"] = fetch_cpu_pct(standby)
+    if master_node:
+        snapshot["cpu_master"] = fetch_cpu_pct(master_node)
+    if slave_node:
+        snapshot["cpu_slave"] = fetch_cpu_pct(slave_node)
 
-    disk_metrics = fetch_disk_latency(primary)
+    disk_source = master_node or (cluster.nodes[0] if cluster.nodes else None)
+    disk_metrics = fetch_disk_latency(disk_source) if disk_source else {"read_ms": None, "write_ms": None}
     snapshot["disk_read_ms"] = disk_metrics["read_ms"]
     snapshot["disk_write_ms"] = disk_metrics["write_ms"]
 
@@ -257,11 +281,11 @@ def fetch_replication_lag_snapshot(primary: NodeConfig) -> dict[str, Any]:
     return snapshot
 
 
-def fetch_cpu_snapshot(primary: NodeConfig, standby: NodeConfig | None) -> dict[str, Any]:
+def fetch_cpu_snapshot(master: NodeConfig, slave: NodeConfig | None) -> dict[str, Any]:
     snapshot: dict[str, Any] = {
         "timestamp": pd.Timestamp.now(tz="Europe/Moscow"),
-        "cpu_primary": fetch_cpu_pct(primary),
-        "cpu_standby": fetch_cpu_pct(standby) if standby else None,
+        "cpu_master": fetch_cpu_pct(master),
+        "cpu_slave": fetch_cpu_pct(slave) if slave else None,
     }
     return snapshot
 
@@ -416,8 +440,8 @@ def build_timeseries(history: list[dict[str, Any]], interval_minutes: int) -> di
 
         cpu_rows.extend(
             [
-                {"timestamp": ts, "node": "Primary CPU", "value": curr["cpu_primary"]},
-                {"timestamp": ts, "node": "Standby CPU", "value": curr["cpu_standby"]},
+                {"timestamp": ts, "node": "Master CPU", "value": curr["cpu_master"]},
+                {"timestamp": ts, "node": "Slave CPU", "value": curr["cpu_slave"]},
             ]
         )
 
@@ -527,8 +551,8 @@ def build_cpu_df(history: list[dict[str, Any]], interval_minutes: int) -> pd.Dat
             continue
         rows.extend(
             [
-                {"timestamp": item["timestamp"], "node": "Primary CPU", "value": item.get("cpu_primary")},
-                {"timestamp": item["timestamp"], "node": "Standby CPU", "value": item.get("cpu_standby")},
+                {"timestamp": item["timestamp"], "node": "Master CPU", "value": item.get("cpu_master")},
+                {"timestamp": item["timestamp"], "node": "Slave CPU", "value": item.get("cpu_slave")},
             ]
         )
     return pd.DataFrame(rows)
@@ -547,10 +571,8 @@ def theme_chart(chart: alt.Chart) -> alt.Chart:
 CHART_HEIGHT = 347
 MAX_WORKLOAD_THREADS = 64
 LOAD_MODE_LABELS = {
-    "r-master": "Чтение с master",
-    "rw-master": "Чтение/запись на master",
-    "r-master-r-slave": "Чтение с master и standby",
-    "rw-master-r-slave": "Запись на master, чтение с master и standby",
+    "r": "Только чтение через VIP",
+    "rw": "Чтение/запись через VIP",
 }
 
 
@@ -708,7 +730,7 @@ def get_workload_status_snapshot() -> dict[str, Any]:
             "mode",
             st.session_state.get(
                 "load_mode",
-                st.session_state.get("persist_load_mode", "rw-master"),
+                st.session_state.get("persist_load_mode", "rw"),
             ),
         )
     )
@@ -742,7 +764,7 @@ def get_workload_status_snapshot() -> dict[str, Any]:
         )
     )
 
-    if mode in {"r-master", "r-master-r-slave"}:
+    if mode == "r":
         mode_details = "100% read"
     else:
         mode_details = f"read {read_ratio:.0%} / write {(1 - read_ratio):.0%}"
@@ -887,9 +909,6 @@ def render_dashboard() -> None:
         st.error("В конфиге не найдено узлов")
         st.stop()
 
-    primary = next((n for n in cluster.nodes if n.role_hint.lower() in {"master", "primary", "leader"}), cluster.nodes[0])
-    standby = next((n for n in cluster.nodes if n.role_hint.lower() in {"slave", "replica", "standby"}), None)
-
     target_db = st.session_state["cluster_dashboard_target_db"]
     auto_refresh = bool(st.session_state["cluster_dashboard_auto_refresh"])
     interval_sec = int(st.session_state["cluster_dashboard_interval_sec"])
@@ -898,12 +917,12 @@ def render_dashboard() -> None:
 
     history_limit = int((window_minutes * 60) / interval_sec) + 30
 
-    session_key = f"{primary.name}|{standby.name if standby else 'none'}|{target_db}"
+    session_key = f"{cluster.vip_dsn}|{target_db}"
     collector = get_async_collector(session_key, interval_sec, history_limit)
     collector.update(interval_sec=interval_sec, history_limit=history_limit)
 
     if auto_refresh:
-        collector.start(lambda: fetch_snapshot(primary, standby, target_db))
+        collector.start(lambda: fetch_snapshot(cluster, target_db))
     def render_live_dashboard_section() -> None:
         title_col, status_col = st.columns([1.45, 1.55], vertical_alignment="center")
         with title_col:
@@ -944,11 +963,11 @@ def render_dashboard() -> None:
             line_chart(series["latency"], "metric", "мс", alt.Scale(zero=True))
 
         def render_cpu_chart() -> None:
-            render_chart_help("cpu", "CPU primary / standby (%)")
+            render_chart_help("cpu", "CPU master / slave (%)")
             line_chart(series["cpu"], "node", "%", alt.Scale(domain=[0, 100]))
 
         def render_disk_chart() -> None:
-            render_chart_help("disk", "Disk latency (Primary, мс)")
+            render_chart_help("disk", "Disk latency (master, мс)")
             line_chart(series["disk"], "metric", "мс", alt.Scale(zero=True))
 
         def render_wal_chart() -> None:
@@ -1000,7 +1019,7 @@ def render_dashboard() -> None:
     )
     st.checkbox("Вертикальная сетка (4 ряда × 2 графика)", key="cluster_dashboard_compact_grid")
     if st.button("Снять новый срез", type="primary", width="stretch"):
-        collector.collect_once(lambda: fetch_snapshot(primary, standby, target_db))
+        collector.collect_once(lambda: fetch_snapshot(cluster, target_db))
         st.rerun()
 
     st.divider()

@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -50,7 +50,6 @@ _SHARED_WORKLOAD_GENERATOR_LOCK = threading.RLock()
 class NodeConfig:
     name: str
     dsn: str
-    role_hint: str = "unknown"
     control_via_ssh: bool = False
     ssh_host: str | None = None
     ssh_user: str | None = None
@@ -66,6 +65,7 @@ class NodeConfig:
 @dataclass
 class ClusterConfig:
     nodes: list[NodeConfig]
+    vip_dsn: str
     poll_interval_sec: int = 2
 
 
@@ -87,7 +87,7 @@ class WorkloadGenerator:
         self._stats: dict[str, int] = {"read_tx": 0, "write_tx": 0, "errors": 0}
         self._recent_errors: list[dict[str, Any]] = []
         self._cluster: ClusterConfig | None = None
-        self._mode: str = "rw-master"
+        self._mode: str = "rw"
         self._read_ratio: float = 0.7
         self._desired_workers: int = 1
         self._sizing: PgLikeSizing = estimate_pg_like_sizing(DEFAULT_WORKLOAD_DB_SIZE_GB)
@@ -213,7 +213,7 @@ class WorkloadGenerator:
         while not self._stop_event.is_set() and not worker_stop_event.is_set():
             node: NodeConfig | None = None
             write_tx = False
-            mode = "rw-master"
+            mode = "rw"
             try:
                 with self._settings_lock:
                     cluster = self._cluster
@@ -223,33 +223,25 @@ class WorkloadGenerator:
                 if cluster is None:
                     raise RuntimeError("Cluster config is not initialized")
 
-                read_only_modes = {"r-master", "r-master-r-slave"}
+                read_only_modes = {"r"}
                 write_tx = False if mode in read_only_modes else random.random() > read_ratio
-                node = select_node_for_workload(cluster.nodes, mode, write_tx)
+                node = select_node_for_workload(cluster.nodes)
                 if not node:
                     raise RuntimeError("No available node for selected mode")
                 try:
-                    execute_workload_tx(node, write_tx, sizing)
+                    execute_workload_tx(cluster.vip_dsn, write_tx, sizing)
                 except Exception as exc:
-                    fallback_node = pick_master_node(cluster.nodes)
-                    should_retry_on_master = (
-                        not write_tx
-                        and fallback_node is not None
-                        and fallback_node.name != node.name
-                        and is_recovery_conflict_error(exc)
-                    )
-                    if not should_retry_on_master:
+                    should_retry = not write_tx and is_recovery_conflict_error(exc)
+                    if not should_retry:
                         raise
 
                     LOGGER.info(
-                        "Retrying read transaction on master after replica recovery conflict | "
-                        "mode=%s failed_node=%s fallback_node=%s",
+                        "Retrying read transaction via VIP after replica recovery conflict | "
+                        "mode=%s failed_node=%s",
                         mode,
                         node.name,
-                        fallback_node.name,
                     )
-                    node = fallback_node
-                    execute_workload_tx(node, write_tx, sizing)
+                    execute_workload_tx(cluster.vip_dsn, write_tx, sizing)
                 with self._lock:
                     self._stats["write_tx" if write_tx else "read_tx"] += 1
             except Exception as exc:
@@ -257,10 +249,9 @@ class WorkloadGenerator:
                 node_name = node.name if node else "unknown"
                 tx_type = "write" if write_tx else "read"
                 LOGGER.error(
-                    "Workload transaction failed | mode=%s node=%s role_hint=%s tx_type=%s error=%s",
+                    "Workload transaction failed | mode=%s node=%s tx_type=%s error=%s",
                     mode,
                     node_name,
-                    node.role_hint if node else "unknown",
                     tx_type,
                     error_message,
                 )
@@ -440,7 +431,7 @@ class BackgroundMetricsCollector:
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
-        self._mode: str = "rw-master"
+        self._mode: str = "rw"
         self._cluster_signature: tuple[Any, ...] | None = None
         self._latest_rows: list[dict[str, Any]] = []
         self._latest_target_db: str = "postgres"
@@ -513,6 +504,7 @@ class BackgroundMetricsCollector:
                     "active_locks": int(sum(int(row.get("active_locks") or 0) for row in rows)),
                     "active_queries": int(sum(int(row.get("active_queries") or 0) for row in rows)),
                     **{f"blks_read_{row['node']}": int(row.get("blks_read") or 0) for row in rows},
+                    **{f"role_{row['node']}": str(row.get("role") or "unknown") for row in rows},
                     **{f"disk_read_latency_{row['node']}": float(row.get("blk_read_time_ms") or 0.0) for row in rows},
                     **{f"disk_write_latency_{row['node']}": float(row.get("blk_write_time_ms") or 0.0) for row in rows},
                     **{f"disk_queue_{row['node']}": float(row.get("disk_io_queue") or 0.0) for row in rows},
@@ -540,51 +532,19 @@ class BackgroundMetricsCollector:
 def build_cluster_signature(cluster: ClusterConfig) -> tuple[Any, ...]:
     return (
         cluster.poll_interval_sec,
-        tuple((node.name, node.dsn, node.role_hint, node.control_via_ssh, node.ssh_host) for node in cluster.nodes),
+        cluster.vip_dsn,
+        tuple((node.name, node.dsn, node.control_via_ssh, node.ssh_host) for node in cluster.nodes),
     )
 
 
-def select_node_for_workload(nodes: list[NodeConfig], mode: str, write_tx: bool) -> NodeConfig | None:
-    master_hints = {"master", "primary", "leader"}
-    slave_hints = {"slave", "replica", "standby"}
-
-    masters = [n for n in nodes if n.role_hint.strip().lower() in master_hints]
-    slaves = [n for n in nodes if n.role_hint.strip().lower() in slave_hints]
-
-    fallback_node = nodes[0] if nodes else None
-
-    if mode in {"single-node", "master-rw", "rw-master", "r-master"}:
-        return masters[0] if masters else fallback_node
-
-    if mode in {"dual-read", "r-master-r-slave"}:
-        readable_nodes = masters + slaves
-        if readable_nodes:
-            return random.choice(readable_nodes)
-        return random.choice(nodes) if nodes else fallback_node
-
-    if mode in {"master-rw-slave-r", "rw-master-r-slave"}:
-        if write_tx:
-            return masters[0] if masters else fallback_node
-        readable_nodes = masters + slaves
-        if readable_nodes:
-            return random.choice(readable_nodes)
-        if masters:
-            return masters[0]
-        return fallback_node
-
-    return fallback_node
+def select_node_for_workload(nodes: list[NodeConfig]) -> NodeConfig | None:
+    if not nodes:
+        return None
+    return random.choice(nodes)
 
 
-def pick_master_node(nodes: list[NodeConfig]) -> NodeConfig | None:
-    master_hints = {"master", "primary", "leader"}
-    masters = [n for n in nodes if n.role_hint.strip().lower() in master_hints]
-    if masters:
-        return masters[0]
-    return nodes[0] if nodes else None
-
-
-def execute_workload_tx(node: NodeConfig, write_tx: bool, sizing: PgLikeSizing) -> None:
-    with psycopg.connect(node.dsn, connect_timeout=2, autocommit=False) as conn:
+def execute_workload_tx(vip_dsn: str, write_tx: bool, sizing: PgLikeSizing) -> None:
+    with psycopg.connect(vip_dsn, connect_timeout=2, autocommit=False) as conn:
         with conn.cursor() as cur:
             cur.execute(f"SET LOCAL lock_timeout = '{WORKLOAD_LOCK_TIMEOUT_MS}ms'")
             cur.execute(f"SET LOCAL statement_timeout = '{WORKLOAD_STATEMENT_TIMEOUT_MS}ms'")
@@ -639,10 +599,7 @@ def extract_dbname_from_dsn(dsn: str) -> str:
 
 
 def get_target_database(cluster: ClusterConfig, mode: str) -> str:
-    preferred_node = select_node_for_workload(cluster.nodes, mode, write_tx=True)
-    if preferred_node:
-        return extract_dbname_from_dsn(preferred_node.dsn)
-    return extract_dbname_from_dsn(cluster.nodes[0].dsn) if cluster.nodes else "postgres"
+    return extract_dbname_from_dsn(cluster.vip_dsn)
 
 
 def load_cluster_config(path: Path) -> ClusterConfig:
@@ -651,8 +608,12 @@ def load_cluster_config(path: Path) -> ClusterConfig:
     if not path.is_file():
         raise ValueError(f"Expected a JSON config file, got a directory: {path}")
     cfg = json.loads(path.read_text(encoding="utf-8"))
-    nodes = [NodeConfig(**item) for item in cfg.get("nodes", [])]
-    return ClusterConfig(nodes=nodes, poll_interval_sec=cfg.get("poll_interval_sec", 2))
+    allowed_keys = {field.name for field in fields(NodeConfig)}
+    nodes = [NodeConfig(**{k: v for k, v in item.items() if k in allowed_keys}) for item in cfg.get("nodes", [])]
+    vip_dsn = cfg.get("vip_dsn")
+    if not vip_dsn:
+        raise ValueError("Config must contain non-empty 'vip_dsn'")
+    return ClusterConfig(nodes=nodes, vip_dsn=str(vip_dsn), poll_interval_sec=cfg.get("poll_interval_sec", 2))
 
 
 def mask_dsn(dsn: str) -> str:
@@ -665,11 +626,24 @@ def mask_dsn(dsn: str) -> str:
     return parsed._replace(netloc=masked_netloc).geturl()
 
 
+def extract_host_from_dsn(dsn: str) -> str:
+    try:
+        conninfo = conninfo_to_dict(dsn)
+    except Exception:
+        conninfo = {}
+    host = str(conninfo.get("host") or "").strip()
+    if host:
+        return host
+    parsed = urlparse(dsn)
+    return parsed.hostname or "-"
+
+
 def fetch_node_metrics(node: NodeConfig, target_db: str) -> dict[str, Any]:
     result: dict[str, Any] = {
         "node": node.name,
+        "host": extract_host_from_dsn(node.dsn),
         "status": "down",
-        "role": node.role_hint,
+        "role": "unknown",
         "replay_delay_sec": None,
         "active_locks": None,
         "xact_commit": None,
@@ -818,8 +792,9 @@ def fetch_all_node_metrics(nodes: list[NodeConfig], target_db: str) -> list[dict
             except Exception as exc:
                 rows_by_name[node.name] = {
                     "node": node.name,
+                    "host": extract_host_from_dsn(node.dsn),
                     "status": "down",
-                    "role": node.role_hint,
+                    "role": "unknown",
                     "replay_delay_sec": None,
                     "active_locks": None,
                     "xact_commit": None,
@@ -1223,10 +1198,10 @@ def sync_workload_settings_from_shared_state() -> None:
         return
 
     legacy_mode_mapping = {
-        "single-node": "rw-master",
-        "master-rw": "rw-master",
-        "dual-read": "r-master-r-slave",
-        "master-rw-slave-r": "rw-master-r-slave",
+        "single-node": "rw",
+        "master-rw": "rw",
+        "dual-read": "r",
+        "master-rw-slave-r": "rw",
     }
 
     if "mode" in persisted:
@@ -1270,7 +1245,7 @@ def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, A
     toggle_type = "primary" if desired_is_running else "secondary"
     if st.sidebar.button(toggle_label, key="sidebar_toggle_load", use_container_width=True, type=toggle_type):
         start_profile = {
-            "mode": st.session_state.get("load_mode", "rw-master"),
+            "mode": st.session_state.get("load_mode", "rw"),
             "clients": int(st.session_state.get("load_clients", 1)),
             "threads_per_client": int(st.session_state.get("load_threads_per_client", 1)),
             "read_ratio": float(st.session_state.get("load_read_ratio", 0.7)),
@@ -1286,14 +1261,14 @@ def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, A
     st.sidebar.header("Профиль нагрузки")
 
     legacy_mode_mapping = {
-        "single-node": "rw-master",
-        "master-rw": "rw-master",
-        "dual-read": "r-master-r-slave",
-        "master-rw-slave-r": "rw-master-r-slave",
+        "single-node": "rw",
+        "master-rw": "rw",
+        "dual-read": "r",
+        "master-rw-slave-r": "rw",
     }
 
     defaults = {
-        "load_mode": "rw-master",
+        "load_mode": "rw",
         "load_clients": 10,
         "load_threads_per_client": 1,
         "load_read_ratio": 0.7,
@@ -1320,12 +1295,10 @@ def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, A
 
     mode = st.sidebar.selectbox(
         "Режим",
-        options=["r-master", "rw-master", "r-master-r-slave", "rw-master-r-slave"],
+        options=["r", "rw"],
         help=(
-            "r-master: только чтение с master; "
-            "rw-master: чтение и запись на master; "
-            "r-master-r-slave: чтение распределяется между master и slave; "
-            "rw-master-r-slave: запись идёт на master, чтение распределяется между master и slave"
+            "r: только чтение через VIP кластера; "
+            "rw: смешанная нагрузка чтение/запись через VIP кластера"
         ),
         key="load_mode",
     )
@@ -1377,7 +1350,7 @@ def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, A
     else:
         st.sidebar.caption(f"Рабочие потоки генератора: реально={total_workers}, настроено={requested_workers}")
     read_ratio = st.sidebar.slider("Доля чтения", 0.0, 1.0, step=0.05, key="load_read_ratio")
-    if mode in {"r-master", "r-master-r-slave"}:
+    if mode == "r":
         st.sidebar.caption("Для профилей только на чтение параметр `Доля чтения` не используется: генератор выполняет только чтение.")
     auto_refresh = st.sidebar.checkbox("Автообновление", key="load_auto_refresh")
 
@@ -1560,7 +1533,7 @@ def render_controls(cluster: ClusterConfig, collector: BackgroundMetricsCollecto
             action = "stop" if is_running else "start"
             action_ru = "остановка" if is_running else "запуск"
 
-            st.write(f"**{node.name}** ({node.role_hint})")
+            st.write(f"**{node.name}**")
             if st.button(button_label, key=f"failure-toggle-{node.name}", use_container_width=True):
                 ok, msg = run_node_action(node, action)
                 st.toast(f"{node.name} {action_ru}: {'OK' if ok else 'ERR'} | {msg}")
@@ -1669,6 +1642,7 @@ def render_metrics(
         columns={
             "status_icon": "State",
             "node": "Node",
+            "host": "Host",
             "status": "Status",
             "role": "Role",
             "replay_delay_sec": "Replay delay, sec",
@@ -1796,25 +1770,34 @@ def render_metrics(
                 "slave": {"slave", "replica", "standby"},
             }
 
-            role_nodes: dict[str, NodeConfig | None] = {"master": None, "slave": None}
+            master_read = pd.Series(0.0, index=chart_df.index)
+            master_write = pd.Series(0.0, index=chart_df.index)
+            slave_read = pd.Series(0.0, index=chart_df.index)
+            slave_write = pd.Series(0.0, index=chart_df.index)
+
             for node in cluster.nodes:
-                normalized_role = node.role_hint.strip().lower()
-                for role, aliases in role_aliases.items():
-                    if role_nodes[role] is None and normalized_role in aliases:
-                        role_nodes[role] = node
-
-            disk_chart_data: dict[str, pd.Series] = {}
-            for role, node in role_nodes.items():
-                if not node:
-                    continue
-
+                role_col = f"role_{node.name}"
                 read_col = f"disk_read_kb_s_{node.name}"
                 write_col = f"disk_write_kb_s_{node.name}"
+                if role_col not in chart_df.columns:
+                    continue
+                role_series = chart_df[role_col].astype(str).str.lower()
+                read_series = chart_df.get(read_col, pd.Series(0.0, index=chart_df.index)).astype(float)
+                write_series = chart_df.get(write_col, pd.Series(0.0, index=chart_df.index)).astype(float)
 
-                if read_col in chart_df.columns:
-                    disk_chart_data[f"{role}_read_kb_s"] = chart_df[read_col]
-                if write_col in chart_df.columns:
-                    disk_chart_data[f"{role}_write_kb_s"] = chart_df[write_col]
+                master_mask = role_series.isin(role_aliases["master"])
+                slave_mask = role_series.isin(role_aliases["slave"])
+                master_read = master_read.add(read_series.where(master_mask, 0.0), fill_value=0.0)
+                master_write = master_write.add(write_series.where(master_mask, 0.0), fill_value=0.0)
+                slave_read = slave_read.add(read_series.where(slave_mask, 0.0), fill_value=0.0)
+                slave_write = slave_write.add(write_series.where(slave_mask, 0.0), fill_value=0.0)
+
+            disk_chart_data: dict[str, pd.Series] = {
+                "master_read_kb_s": master_read,
+                "master_write_kb_s": master_write,
+                "slave_read_kb_s": slave_read,
+                "slave_write_kb_s": slave_write,
+            }
 
             if disk_chart_data:
                 disk_chart_df = pd.DataFrame(disk_chart_data, index=chart_df.index)
