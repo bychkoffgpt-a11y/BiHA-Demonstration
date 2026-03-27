@@ -133,10 +133,22 @@ def detect_node_role(node: NodeConfig) -> str:
     return "unknown"
 
 
-def fetch_snapshot(cluster: ClusterConfig, target_db: str) -> dict[str, Any]:
-    role_by_node = {node.name: detect_node_role(node) for node in cluster.nodes}
+def select_nodes_for_host_metrics(cluster: ClusterConfig, role_by_node: dict[str, str]) -> tuple[NodeConfig | None, NodeConfig | None]:
     master_node = next((n for n in cluster.nodes if role_by_node.get(n.name) == "master"), None)
     slave_node = next((n for n in cluster.nodes if role_by_node.get(n.name) == "slave"), None)
+
+    ssh_enabled_nodes = [n for n in cluster.nodes if n.control_via_ssh and n.ssh_host]
+    if master_node is None:
+        master_node = next((n for n in ssh_enabled_nodes), cluster.nodes[0] if cluster.nodes else None)
+    if slave_node is None:
+        slave_node = next((n for n in ssh_enabled_nodes if master_node is None or n.name != master_node.name), None)
+
+    return master_node, slave_node
+
+
+def fetch_snapshot(cluster: ClusterConfig, target_db: str) -> dict[str, Any]:
+    role_by_node = {node.name: detect_node_role(node) for node in cluster.nodes}
+    master_node, slave_node = select_nodes_for_host_metrics(cluster, role_by_node)
 
     snapshot: dict[str, Any] = {
         "timestamp": pd.Timestamp.now(tz="Europe/Moscow"),
