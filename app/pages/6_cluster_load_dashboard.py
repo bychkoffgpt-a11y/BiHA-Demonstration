@@ -120,35 +120,21 @@ def run_ssh_metric(node: NodeConfig, remote_cmd: str, timeout_sec: int = 8) -> s
     return output or None
 
 
-def detect_node_role(node: NodeConfig) -> str:
-    try:
-        with psycopg.connect(node.dsn, connect_timeout=2, autocommit=True) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT CASE WHEN pg_is_in_recovery() THEN 'slave' ELSE 'master' END")
-                row = cur.fetchone()
-                if row and row[0]:
-                    return str(row[0]).lower()
-    except Exception:
-        LOGGER.exception("Не удалось определить роль узла=%s", node.name)
-    return "unknown"
-
-
-def select_nodes_for_host_metrics(cluster: ClusterConfig, role_by_node: dict[str, str]) -> tuple[NodeConfig | None, NodeConfig | None]:
-    master_node = next((n for n in cluster.nodes if role_by_node.get(n.name) == "master"), None)
-    slave_node = next((n for n in cluster.nodes if role_by_node.get(n.name) == "slave"), None)
-
-    ssh_enabled_nodes = [n for n in cluster.nodes if n.control_via_ssh and n.ssh_host]
-    if master_node is None:
-        master_node = next((n for n in ssh_enabled_nodes), cluster.nodes[0] if cluster.nodes else None)
-    if slave_node is None:
-        slave_node = next((n for n in ssh_enabled_nodes if master_node is None or n.name != master_node.name), None)
-
-    return master_node, slave_node
+def select_nodes_for_host_metrics(cluster: ClusterConfig) -> tuple[NodeConfig | None, NodeConfig | None]:
+    by_name = {node.name: node for node in cluster.nodes}
+    node_1 = by_name.get("pg-node-1")
+    node_2 = by_name.get("pg-node-2")
+    if node_1 and node_2:
+        return node_1, node_2
+    ssh_enabled_nodes = [node for node in cluster.nodes if node.control_via_ssh and node.ssh_host]
+    fallback = ssh_enabled_nodes if ssh_enabled_nodes else cluster.nodes
+    first = fallback[0] if fallback else None
+    second = fallback[1] if len(fallback) > 1 else None
+    return first, second
 
 
 def fetch_snapshot(cluster: ClusterConfig, target_db: str) -> dict[str, Any]:
-    role_by_node = {node.name: detect_node_role(node) for node in cluster.nodes}
-    master_node, slave_node = select_nodes_for_host_metrics(cluster, role_by_node)
+    node_1, node_2 = select_nodes_for_host_metrics(cluster)
 
     snapshot: dict[str, Any] = {
         "timestamp": pd.Timestamp.now(tz="Europe/Moscow"),
@@ -161,12 +147,12 @@ def fetch_snapshot(cluster: ClusterConfig, target_db: str) -> dict[str, Any]:
         "waiting": 0,
         "wal_bytes": None,
         "replay_lag_sec": None,
-        "cpu_master": None,
-        "cpu_slave": None,
-        "disk_read_ms": None,
-        "disk_write_ms": None,
-        "master_node_name": master_node.name if master_node else None,
-        "slave_node_name": slave_node.name if slave_node else None,
+        "cpu_node_1": None,
+        "cpu_node_2": None,
+        "disk_latency_node_1_ms": None,
+        "disk_latency_node_2_ms": None,
+        "node_1_name": node_1.name if node_1 else None,
+        "node_2_name": node_2.name if node_2 else None,
     }
 
     try:
@@ -236,15 +222,12 @@ def fetch_snapshot(cluster: ClusterConfig, target_db: str) -> dict[str, Any]:
     except Exception:
         LOGGER.exception("Не удалось собрать метрики PostgreSQL через VIP")
 
-    if master_node:
-        snapshot["cpu_master"] = fetch_cpu_pct(master_node)
-    if slave_node:
-        snapshot["cpu_slave"] = fetch_cpu_pct(slave_node)
-
-    disk_source = master_node or (cluster.nodes[0] if cluster.nodes else None)
-    disk_metrics = fetch_disk_latency(disk_source) if disk_source else {"read_ms": None, "write_ms": None}
-    snapshot["disk_read_ms"] = disk_metrics["read_ms"]
-    snapshot["disk_write_ms"] = disk_metrics["write_ms"]
+    if node_1:
+        snapshot["cpu_node_1"] = fetch_cpu_pct(node_1)
+        snapshot["disk_latency_node_1_ms"] = to_single_disk_latency_ms(fetch_disk_latency(node_1))
+    if node_2:
+        snapshot["cpu_node_2"] = fetch_cpu_pct(node_2)
+        snapshot["disk_latency_node_2_ms"] = to_single_disk_latency_ms(fetch_disk_latency(node_2))
 
     return snapshot
 
@@ -303,8 +286,8 @@ def fetch_replication_lag_snapshot(primary: NodeConfig) -> dict[str, Any]:
 def fetch_cpu_snapshot(master: NodeConfig, slave: NodeConfig | None) -> dict[str, Any]:
     snapshot: dict[str, Any] = {
         "timestamp": pd.Timestamp.now(tz="Europe/Moscow"),
-        "cpu_master": fetch_cpu_pct(master),
-        "cpu_slave": fetch_cpu_pct(slave) if slave else None,
+        "cpu_node_1": fetch_cpu_pct(master),
+        "cpu_node_2": fetch_cpu_pct(slave) if slave else None,
     }
     return snapshot
 
@@ -404,6 +387,13 @@ def fetch_disk_latency(node: NodeConfig) -> dict[str, float | None]:
     return metrics
 
 
+def to_single_disk_latency_ms(metrics: dict[str, float | None]) -> float | None:
+    values = [value for value in (metrics.get("read_ms"), metrics.get("write_ms")) if value is not None]
+    if not values:
+        return None
+    return round(sum(values) / len(values), 3)
+
+
 
 def rate(curr: float | int | None, prev: float | int | None, dt_sec: float) -> float | None:
     if curr is None or prev is None or dt_sec <= 0:
@@ -459,15 +449,15 @@ def build_timeseries(history: list[dict[str, Any]], interval_minutes: int) -> di
 
         cpu_rows.extend(
             [
-                {"timestamp": ts, "node": "Master CPU", "value": curr["cpu_master"]},
-                {"timestamp": ts, "node": "Slave CPU", "value": curr["cpu_slave"]},
+                {"timestamp": ts, "node": curr.get("node_1_name") or "pg-node-1", "value": curr["cpu_node_1"]},
+                {"timestamp": ts, "node": curr.get("node_2_name") or "pg-node-2", "value": curr["cpu_node_2"]},
             ]
         )
 
         disk_rows.extend(
             [
-                {"timestamp": ts, "metric": "Read", "value": curr["disk_read_ms"]},
-                {"timestamp": ts, "metric": "Write", "value": curr["disk_write_ms"]},
+                {"timestamp": ts, "node": curr.get("node_1_name") or "pg-node-1", "value": curr["disk_latency_node_1_ms"]},
+                {"timestamp": ts, "node": curr.get("node_2_name") or "pg-node-2", "value": curr["disk_latency_node_2_ms"]},
             ]
         )
 
@@ -570,8 +560,8 @@ def build_cpu_df(history: list[dict[str, Any]], interval_minutes: int) -> pd.Dat
             continue
         rows.extend(
             [
-                {"timestamp": item["timestamp"], "node": "Master CPU", "value": item.get("cpu_master")},
-                {"timestamp": item["timestamp"], "node": "Slave CPU", "value": item.get("cpu_slave")},
+                {"timestamp": item["timestamp"], "node": item.get("node_1_name") or "pg-node-1", "value": item.get("cpu_node_1")},
+                {"timestamp": item["timestamp"], "node": item.get("node_2_name") or "pg-node-2", "value": item.get("cpu_node_2")},
             ]
         )
     return pd.DataFrame(rows)
@@ -646,7 +636,7 @@ CHART_EXPLANATIONS = {
 """.strip(),
     "cpu": """
 **Источник данных**
-- Метрика берётся по SSH с primary и standby-узлов.
+- Метрика берётся по SSH с узлов `pg-node-1` и `pg-node-2` из JSON-конфига.
 - На хосте читается `/proc/stat` два раза с паузой 1 секунда.
 
 **Как считается загрузка CPU**
@@ -656,14 +646,14 @@ CHART_EXPLANATIONS = {
    `CPU% = (total_delta - idle_delta) / total_delta * 100`
 
 **Что показывает график**
-- `Primary CPU` — загрузка primary-узла.
-- `Standby CPU` — загрузка standby-узла.
+- `pg-node-1` — загрузка первого узла.
+- `pg-node-2` — загрузка второго узла.
 
 Если SSH недоступен или ответ не разобрался, точка пропускается.
 """.strip(),
     "disk": """
 **Источник данных**
-- Метрика берётся по SSH только с primary-узла.
+- Метрика берётся по SSH с узлов `pg-node-1` и `pg-node-2` из JSON-конфига.
 - Основной способ: `iostat -dx 1 2`
 - Резервный способ: расчёт по `/proc/diskstats`
 
@@ -674,8 +664,8 @@ CHART_EXPLANATIONS = {
 - При fallback-режиме приложение считает среднее время на операцию по дельте счётчиков чтения/записи между двумя замерами.
 
 **Что показывает график**
-- `Read` — средняя latency чтения диска в миллисекундах
-- `Write` — средняя latency записи диска в миллисекундах
+- `pg-node-1` — средняя disk latency (усреднение read/write) в миллисекундах
+- `pg-node-2` — средняя disk latency (усреднение read/write) в миллисекундах
 
 Если в конфиге задан `disk_device`, график строится именно по этому устройству.
 """.strip(),
@@ -982,12 +972,12 @@ def render_dashboard() -> None:
             line_chart(series["latency"], "metric", "мс", alt.Scale(zero=True))
 
         def render_cpu_chart() -> None:
-            render_chart_help("cpu", "CPU master / slave (%)")
+            render_chart_help("cpu", "CPU pg-node-1 / pg-node-2 (%)")
             line_chart(series["cpu"], "node", "%", alt.Scale(domain=[0, 100]))
 
         def render_disk_chart() -> None:
-            render_chart_help("disk", "Disk latency (master, мс)")
-            line_chart(series["disk"], "metric", "мс", alt.Scale(zero=True))
+            render_chart_help("disk", "Disk Latency pg-node-1 / pg-node-2 (мс)")
+            line_chart(series["disk"], "node", "мс", alt.Scale(zero=True))
 
         def render_wal_chart() -> None:
             render_chart_help("wal", "WAL generation rate (MB/s)")
