@@ -1094,12 +1094,157 @@ def request_reset_caches() -> None:
     st.rerun()
 
 
+def request_master_switchover() -> None:
+    st.session_state["confirm_master_switchover_inline"] = False
+    st.session_state["pending_master_switchover_action"] = True
+    st.rerun()
+
+
+def switchover_master_role(cluster: ClusterConfig) -> list[tuple[str, str]]:
+    target_db = get_target_database(cluster, "rw")
+    rows = fetch_all_node_metrics(cluster.nodes, target_db)
+    if not rows:
+        return [("error", "Не удалось получить состояние узлов перед переключением master.")]
+
+    role_aliases = {
+        "master": {"master", "primary", "leader"},
+        "slave": {"slave", "replica", "standby"},
+    }
+    nodes_by_name = {node.name: node for node in cluster.nodes}
+
+    masters = [
+        row
+        for row in rows
+        if str(row.get("status")).lower() == "up" and str(row.get("role")).lower() in role_aliases["master"]
+    ]
+    slaves = [
+        row
+        for row in rows
+        if str(row.get("status")).lower() == "up" and str(row.get("role")).lower() in role_aliases["slave"]
+    ]
+
+    if len(masters) != 1:
+        return [
+            (
+                "error",
+                "Для безопасного переключения требуется ровно один активный master. "
+                f"Сейчас обнаружено: {len(masters)}.",
+            )
+        ]
+    if not slaves:
+        return [("error", "Не найден активный slave, на который можно безопасно перевести роль master.")]
+
+    old_master_row = masters[0]
+    new_master_row = slaves[0]
+    old_master = nodes_by_name.get(str(old_master_row["node"]))
+    new_master = nodes_by_name.get(str(new_master_row["node"]))
+
+    if old_master is None or new_master is None:
+        return [("error", "Не удалось сопоставить роли узлов с конфигурацией кластера.")]
+
+    if not old_master.control_via_ssh or not old_master.ssh_host:
+        return [("error", f"Для узла master '{old_master.name}' не настроено SSH-управление.")]
+    if not new_master.control_via_ssh or not new_master.ssh_host:
+        return [("error", f"Для узла slave '{new_master.name}' не настроено SSH-управление.")]
+
+    messages: list[tuple[str, str]] = []
+    if len(slaves) > 1:
+        messages.append(
+            (
+                "warning",
+                f"Обнаружено несколько slave-узлов ({len(slaves)}). "
+                f"Для переключения выбран '{new_master.name}'.",
+            )
+        )
+
+    ok, output = run_node_action(old_master, "stop")
+    if not ok:
+        messages.append(
+            (
+                "error",
+                f"Не удалось остановить текущий master '{old_master.name}': {output or 'unknown error'}.",
+            )
+        )
+        return messages
+
+    promoted = False
+    for _ in range(20):
+        time.sleep(2)
+        candidate_metrics = fetch_node_metrics(new_master, target_db)
+        candidate_role = str(candidate_metrics.get("role", "")).lower()
+        candidate_status = str(candidate_metrics.get("status", "")).lower()
+        if candidate_status == "up" and candidate_role in role_aliases["master"]:
+            promoted = True
+            break
+
+    if not promoted:
+        messages.append(
+            (
+                "error",
+                f"Узел '{new_master.name}' не принял роль master за отведённое время. "
+                "Выполняем попытку вернуть сервис на прежнем master.",
+            )
+        )
+        rollback_ok, rollback_output = run_node_action(old_master, "start")
+        if rollback_ok:
+            messages.append(("warning", f"Сервис на '{old_master.name}' запущен обратно после неуспешного переключения."))
+        else:
+            messages.append(
+                (
+                    "error",
+                    f"Не удалось вернуть сервис на '{old_master.name}': {rollback_output or 'unknown error'}.",
+                )
+            )
+        return messages
+
+    start_ok, start_output = run_node_action(old_master, "start")
+    if not start_ok:
+        messages.append(
+            (
+                "warning",
+                f"Новый master: '{new_master.name}'. Не удалось запустить бывший master '{old_master.name}': "
+                f"{start_output or 'unknown error'}.",
+            )
+        )
+        return messages
+
+    for _ in range(20):
+        time.sleep(2)
+        old_master_metrics = fetch_node_metrics(old_master, target_db)
+        old_role = str(old_master_metrics.get("role", "")).lower()
+        old_status = str(old_master_metrics.get("status", "")).lower()
+        if old_status == "up" and old_role in role_aliases["slave"]:
+            messages.append(
+                (
+                    "success",
+                    f"Переключение роли master выполнено: '{new_master.name}' стал master, "
+                    f"'{old_master.name}' вернулся как slave.",
+                )
+            )
+            return messages
+
+    messages.append(
+        (
+            "warning",
+            f"Роль master переключена на '{new_master.name}', но узел '{old_master.name}' "
+            "не подтвердил роль slave за отведённое время.",
+        )
+    )
+    return messages
+
+
 def run_pending_service_operations(cluster: ClusterConfig) -> None:
     if st.session_state.pop("pending_reset_caches_action", False):
         with st.spinner("Очищаем page cache/dentries/inodes на нодах кластера..."):
             messages = reset_all_node_caches(cluster)
         if not messages:
             messages = [("info", "Очистка кэшей завершена, но узлы для обработки не найдены.")]
+        st.session_state["pending_service_operation_messages"] = messages
+    elif st.session_state.pop("pending_master_switchover_action", False):
+        with st.spinner("Переключаем роль master между PostgreSQL-нодами..."):
+            messages = switchover_master_role(cluster)
+        if not messages:
+            messages = [("warning", "Операция переключения завершена без диагностических сообщений.")]
         st.session_state["pending_service_operation_messages"] = messages
 
 
@@ -1172,6 +1317,48 @@ def open_reset_caches_dialog(cluster: ClusterConfig) -> None:
             request_reset_caches()
         if confirm_cols[1].button("❌ Отмена", key="confirm_reset_caches_no_dialog", use_container_width=True):
             st.session_state["confirm_reset_caches_inline"] = False
+            st.rerun()
+
+    _dialog()
+
+
+def open_master_switchover_dialog(cluster: ClusterConfig) -> None:
+    if not st.session_state.get("confirm_master_switchover_inline", False):
+        return
+
+    if not hasattr(st, "dialog"):
+        with st.sidebar.container(border=True):
+            st.warning(
+                "Подтвердите безопасное переключение роли master между двумя PostgreSQL-нодами. "
+                "Сначала будет остановлен текущий master, затем ожидается автоматическое повышение standby."
+            )
+            confirm_cols = st.columns(2)
+            if confirm_cols[0].button(
+                "✅ Да, переключить master",
+                key="confirm_master_switchover_yes",
+                use_container_width=True,
+            ):
+                request_master_switchover()
+            if confirm_cols[1].button("❌ Отмена", key="confirm_master_switchover_no", use_container_width=True):
+                st.session_state["confirm_master_switchover_inline"] = False
+                st.rerun()
+        return
+
+    @st.dialog("Переключить роль master?")
+    def _dialog() -> None:
+        st.warning(
+            "Будет выполнено контролируемое переключение роли master между двумя узлами кластера. "
+            "Операция требует корректной настройки авто-failover и SSH-доступа."
+        )
+        confirm_cols = st.columns(2)
+        if confirm_cols[0].button(
+            "✅ Да, переключить master",
+            key="confirm_master_switchover_yes_dialog",
+            use_container_width=True,
+        ):
+            request_master_switchover()
+        if confirm_cols[1].button("❌ Отмена", key="confirm_master_switchover_no_dialog", use_container_width=True):
+            st.session_state["confirm_master_switchover_inline"] = False
             st.rerun()
 
     _dialog()
@@ -1380,9 +1567,13 @@ def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, A
     if st.sidebar.button("🧹 Сбросить кэши", use_container_width=True, key="sidebar_reset_caches"):
         st.session_state["confirm_reset_caches_inline"] = True
         st.rerun()
+    if st.sidebar.button("🔁 Переключить master", use_container_width=True, key="sidebar_master_switchover"):
+        st.session_state["confirm_master_switchover_inline"] = True
+        st.rerun()
 
     open_reset_counters_dialog(cluster, wg)
     open_reset_caches_dialog(cluster)
+    open_master_switchover_dialog(cluster)
     run_pending_service_operations(cluster)
     render_pending_service_operation_messages()
 
