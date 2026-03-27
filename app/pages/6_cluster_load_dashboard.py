@@ -53,7 +53,14 @@ def load_cluster_config(path: Path) -> ClusterConfig:
         raise ValueError(f"Ожидался JSON-файл конфига, но указан каталог: {path}")
     cfg = json.loads(path.read_text(encoding="utf-8"))
     allowed_keys = {field.name for field in fields(NodeConfig)}
-    nodes = [NodeConfig(**{k: v for k, v in item.items() if k in allowed_keys}) for item in cfg.get("nodes", [])]
+    nodes: list[NodeConfig] = []
+    for item in cfg.get("nodes", []):
+        payload = {k: v for k, v in item.items() if k in allowed_keys}
+        # Обратная совместимость: в старых конфигах мог отсутствовать control_via_ssh,
+        # но при этом был задан ssh_host и метрики CPU/Disk ожидались рабочими.
+        if "control_via_ssh" not in payload and payload.get("ssh_host"):
+            payload["control_via_ssh"] = True
+        nodes.append(NodeConfig(**payload))
     vip_dsn = cfg.get("vip_dsn")
     if not vip_dsn:
         raise ValueError("В конфиге должен быть указан vip_dsn")
