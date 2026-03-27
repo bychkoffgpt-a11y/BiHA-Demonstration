@@ -7,7 +7,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from cluster_demo import load_cluster_config, select_node_for_workload
+from cluster_demo import load_cluster_config
 from ui_styles import apply_base_page_styles
 from workload_profiles import initialize_pg_like_dataset
 
@@ -45,6 +45,7 @@ workers = st.number_input(
 cluster = None
 node = None
 config_error: str | None = None
+vip_dsn: str | None = None
 
 try:
     cluster = load_cluster_config(cfg_path)
@@ -53,11 +54,12 @@ except Exception as exc:
     st.error(f"Не удалось прочитать конфиг: {exc}")
 
 if cluster is not None:
-    node = select_node_for_workload(cluster.nodes, "rw-master", write_tx=True)
+    node = cluster.nodes[0] if cluster.nodes else None
+    vip_dsn = cluster.vip_dsn
     if not node:
         st.warning("В конфиге нет узлов")
     else:
-        st.info(f"Целевая нода для инициализации: {node.name}")
+        st.info(f"Подключение для инициализации выполняется через VIP. Базовый узел для SSH-операций: {node.name}")
 
 
 def run_init() -> None:
@@ -78,7 +80,7 @@ def run_init() -> None:
 
     try:
         result = initialize_pg_like_dataset(
-            node.dsn,
+            vip_dsn,
             float(target_size_gb),
             worker_count=int(workers),
             progress_cb=cb,
@@ -90,7 +92,7 @@ def run_init() -> None:
         state["running"] = False
 
 
-can_start = config_error is None and node is not None and not state["running"]
+can_start = config_error is None and node is not None and vip_dsn is not None and not state["running"]
 if st.button("Старт создания/наполнения БД", type="primary", disabled=not can_start):
     threading.Thread(target=run_init, daemon=True).start()
     st.rerun()
