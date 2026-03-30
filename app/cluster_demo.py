@@ -44,6 +44,8 @@ WORKLOAD_STATUS_SYNC_KEYS = ("mode", "clients", "threads_per_client", "read_rati
 SHARED_WORKLOAD_RUNTIME_ID = "shared-workload-runtime"
 _SHARED_WORKLOAD_GENERATOR: WorkloadGenerator | None = None
 _SHARED_WORKLOAD_GENERATOR_LOCK = threading.RLock()
+MASTER_ROLE_ALIASES = {"master", "primary", "leader", "rw", "writer", "readwrite", "read-write"}
+SLAVE_ROLE_ALIASES = {"slave", "replica", "standby", "ro", "reader", "readonly", "read-only"}
 
 
 @dataclass
@@ -67,6 +69,21 @@ class ClusterConfig:
     nodes: list[NodeConfig]
     vip_dsn: str
     poll_interval_sec: int = 2
+
+
+def classify_node_role(role_value: Any, tx_read_only: Any) -> str:
+    normalized_role = str(role_value or "").strip().lower()
+    if normalized_role in MASTER_ROLE_ALIASES:
+        return "master"
+    if normalized_role in SLAVE_ROLE_ALIASES:
+        return "slave"
+
+    normalized_tx_read_only = str(tx_read_only or "").strip().lower()
+    if normalized_tx_read_only in {"off", "false", "0", "no"}:
+        return "master"
+    if normalized_tx_read_only in {"on", "true", "1", "yes"}:
+        return "slave"
+    return "unknown"
 
 
 class WorkloadGenerator:
@@ -1146,21 +1163,19 @@ def switchover_master_role(cluster: ClusterConfig) -> dict[str, Any]:
         result["messages"] = [("error", "Не удалось получить состояние узлов перед переключением master.")]
         return result
 
-    role_aliases = {
-        "master": {"master", "primary", "leader"},
-        "slave": {"slave", "replica", "standby"},
-    }
     nodes_by_name = {node.name: node for node in cluster.nodes}
 
     masters = [
         row
         for row in rows
-        if str(row.get("status")).lower() == "up" and str(row.get("role")).lower() in role_aliases["master"]
+        if str(row.get("status")).lower() == "up"
+        and classify_node_role(row.get("role"), row.get("tx_read_only")) == "master"
     ]
     slaves = [
         row
         for row in rows
-        if str(row.get("status")).lower() == "up" and str(row.get("role")).lower() in role_aliases["slave"]
+        if str(row.get("status")).lower() == "up"
+        and classify_node_role(row.get("role"), row.get("tx_read_only")) == "slave"
     ]
 
     if len(masters) != 1:
@@ -1227,9 +1242,12 @@ def switchover_master_role(cluster: ClusterConfig) -> dict[str, Any]:
     for _ in range(20):
         time.sleep(2)
         candidate_metrics = fetch_node_metrics(new_master, target_db)
-        candidate_role = str(candidate_metrics.get("role", "")).lower()
         candidate_status = str(candidate_metrics.get("status", "")).lower()
-        if candidate_status == "up" and candidate_role in role_aliases["master"]:
+        candidate_class = classify_node_role(
+            candidate_metrics.get("role", ""),
+            candidate_metrics.get("tx_read_only"),
+        )
+        if candidate_status == "up" and candidate_class == "master":
             promoted = True
             break
 
@@ -1287,9 +1305,12 @@ def switchover_master_role(cluster: ClusterConfig) -> dict[str, Any]:
     for _ in range(20):
         time.sleep(2)
         old_master_metrics = fetch_node_metrics(old_master, target_db)
-        old_role = str(old_master_metrics.get("role", "")).lower()
         old_status = str(old_master_metrics.get("status", "")).lower()
-        if old_status == "up" and old_role in role_aliases["slave"]:
+        old_class = classify_node_role(
+            old_master_metrics.get("role", ""),
+            old_master_metrics.get("tx_read_only"),
+        )
+        if old_status == "up" and old_class == "slave":
             messages.append(
                 (
                     "success",
