@@ -42,7 +42,8 @@ def load_scenarios_from_directory(directory: str | Path) -> list[ScenarioDTO]:
         return []
 
     scenarios: list[ScenarioDTO] = []
-    for path in sorted(base_path.glob("*.yaml")):
+    scenario_paths = sorted(base_path.glob("*.yaml")) + sorted(base_path.glob("*.yml"))
+    for path in scenario_paths:
         scenarios.append(_load_scenario_file(path))
     return scenarios
 

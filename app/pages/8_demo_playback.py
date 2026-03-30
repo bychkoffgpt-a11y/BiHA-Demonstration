@@ -6,7 +6,12 @@ from pathlib import Path
 
 import streamlit as st
 
-from orchestration.demo_runner import RunStatus, ScenarioRun, get_demo_runner
+from orchestration.demo_runner import (
+    RunStatus,
+    ScenarioRun,
+    get_demo_runner,
+    get_scenario_catalog_status,
+)
 from ui_styles import apply_base_page_styles
 
 STATUS_STYLE = {
@@ -307,6 +312,34 @@ st.title("Demo Playback")
 st.caption("Topology, timeline, SLO and event stream for failover demos")
 
 runner = get_demo_runner()
+catalog_status = get_scenario_catalog_status()
+
+if catalog_status.error:
+    st.error(f"Ошибка загрузки сценариев: {catalog_status.error}")
+elif catalog_status.fallback_used:
+    st.warning("Каталог config/demo_scenarios пуст. Используется встроенный fallback-сценарий.")
+
+scenarios = runner.list_scenarios()
+if scenarios:
+    scenario_options = {f"{scenario.name} ({scenario.id})": scenario for scenario in scenarios}
+    selected_label = st.selectbox("Сценарий для запуска", options=list(scenario_options.keys()))
+    selected_scenario = scenario_options[selected_label]
+
+    st.caption(
+        f"Источник сценариев: {catalog_status.loaded_from}. Загружено: {len(scenarios)}."
+    )
+
+    col_start, col_stop = st.columns(2)
+    with col_start:
+        if st.button("▶️ Запустить выбранный сценарий", type="primary", width="stretch"):
+            st.session_state["scenario_run_id"] = runner.start_scenario(selected_scenario.id)
+    with col_stop:
+        if st.button("⏹ Остановить текущий сценарий", width="stretch"):
+            run_id = st.session_state.get("scenario_run_id")
+            if run_id:
+                runner.stop_scenario(run_id)
+else:
+    st.warning("Сценарии не зарегистрированы.")
 
 st.session_state.setdefault("demo_playback_cfg_path", "config/cluster.json")
 raw_cfg_path = str(st.session_state["demo_playback_cfg_path"]).strip()
