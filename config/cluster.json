@@ -1,0 +1,40 @@
+{
+  "poll_interval_sec": 2,
+  "vip_dsn": "postgresql://postgres:postgres@10.0.0.100:5432/postgres",
+  "nodes": [
+    {
+      "name": "pg-node-1",
+      "dsn": "postgresql://postgres:postgres@10.0.0.11:5432/postgres",
+      "control_via_ssh": true,
+      "ssh_host": "10.0.0.11",
+      "ssh_user": "postgres",
+      "ssh_port": 22,
+      "ssh_identity_file": "/home/appuser/.ssh/id_ed25519",
+      "ssh_legacy_algorithms": false,
+      "ssh_extra_options": [
+        "ServerAliveInterval=15",
+        "ServerAliveCountMax=3"
+      ],
+      "service_name": "postgrespro",
+      "collect_disk_metrics_via_ssh": true,
+      "disk_device": "/dev/sda"
+    },
+    {
+      "name": "pg-node-2",
+      "dsn": "postgresql://postgres:postgres@10.0.0.12:5432/postgres",
+      "control_via_ssh": true,
+      "ssh_host": "10.0.0.12",
+      "ssh_user": "postgres",
+      "ssh_port": 22,
+      "ssh_identity_file": "/home/appuser/.ssh/id_ed25519",
+      "ssh_legacy_algorithms": false,
+      "ssh_extra_options": [
+        "ServerAliveInterval=15",
+        "ServerAliveCountMax=3"
+      ],
+      "service_name": "postgrespro",
+      "collect_disk_metrics_via_ssh": true,
+      "disk_device": "/dev/sdb"
+    }
+  ]
+}
