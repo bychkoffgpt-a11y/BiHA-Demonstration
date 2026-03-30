@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import streamlit as st
 
@@ -111,7 +113,29 @@ def _format_ts(ts: datetime | None) -> str:
     return ts.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def _build_topology(run: ScenarioRun | None) -> tuple[list[dict[str, str]], list[tuple[str, str]], bool, bool]:
+def _load_nodes_from_config(cfg_path: Path) -> list[dict[str, str]]:
+    with cfg_path.open("r", encoding="utf-8") as fh:
+        cfg = json.load(fh)
+    raw_nodes = cfg.get("nodes", [])
+    if not isinstance(raw_nodes, list) or not raw_nodes:
+        raise ValueError("В конфиге не найден список nodes")
+
+    nodes: list[dict[str, str]] = []
+    for index, item in enumerate(raw_nodes):
+        if not isinstance(item, dict):
+            continue
+        node_name = str(item.get("name", "")).strip()
+        if not node_name:
+            continue
+        role = "leader" if index == 0 else "replica"
+        nodes.append({"name": node_name, "role": role, "status": "up"})
+
+    if not nodes:
+        raise ValueError("В конфиге нет валидных узлов с полем name")
+    return nodes
+
+
+def _build_topology(run: ScenarioRun | None, configured_nodes: list[dict[str, str]]) -> tuple[list[dict[str, str]], list[tuple[str, str]], bool, bool]:
     failover_detected = False
     role_shift_detected = False
     if run:
@@ -123,11 +147,9 @@ def _build_topology(run: ScenarioRun | None) -> tuple[list[dict[str, str]], list
             if "restart" in action and step.status in {"running", "failed"}:
                 failover_detected = True
 
-    nodes = [
-        {"name": "pg-node-1", "role": "leader", "status": "up"},
-        {"name": "pg-node-2", "role": "replica", "status": "up"},
-        {"name": "pg-node-3", "role": "replica", "status": "up"},
-    ]
+    nodes = [node.copy() for node in configured_nodes]
+    default_leader = nodes[0]["name"]
+    promoted_leader = nodes[1]["name"] if len(nodes) > 1 else default_leader
 
     if run and run.status in {RunStatus.RUNNING, RunStatus.FAILED} and run.current_step_index >= 0:
         current_target = run.step_logs[run.current_step_index].target_node
@@ -137,21 +159,22 @@ def _build_topology(run: ScenarioRun | None) -> tuple[list[dict[str, str]], list
 
     if failover_detected:
         for node in nodes:
-            if node["name"] == "pg-node-2":
+            if node["name"] == promoted_leader:
                 node["role"] = "leader"
                 node["status"] = "up"
-            if node["name"] == "pg-node-1":
+            elif node["name"] == default_leader:
                 node["role"] = "replica"
                 if run and run.status == RunStatus.RUNNING:
                     node["status"] = "degraded"
 
-    links = [("pg-node-2" if failover_detected else "pg-node-1", "pg-node-1"), ("pg-node-2" if failover_detected else "pg-node-1", "pg-node-3")]
+    source = promoted_leader if failover_detected else default_leader
+    links = [(source, node["name"]) for node in nodes if node["name"] != source]
     return nodes, links, failover_detected, role_shift_detected
 
 
-def _render_topology_map(run: ScenarioRun | None, presentation_mode: bool) -> None:
+def _render_topology_map(run: ScenarioRun | None, configured_nodes: list[dict[str, str]], presentation_mode: bool) -> None:
     st.subheader("Topology Map")
-    nodes, links, failover_detected, role_shift_detected = _build_topology(run)
+    nodes, links, failover_detected, role_shift_detected = _build_topology(run, configured_nodes)
 
     classes = "presentation-mode" if presentation_mode else ""
     st.markdown(f'<div class="{classes}">', unsafe_allow_html=True)
@@ -285,8 +308,28 @@ st.caption("Topology, timeline, SLO and event stream for failover demos")
 
 runner = get_demo_runner()
 
+st.session_state.setdefault("demo_playback_cfg_path", "config/cluster.json")
+raw_cfg_path = str(st.session_state["demo_playback_cfg_path"]).strip()
+cfg_path = Path(raw_cfg_path)
+if not raw_cfg_path:
+    st.error("Укажите путь к JSON-конфигу кластера.")
+    st.stop()
+if not cfg_path.exists():
+    st.error(f"Конфиг не найден: {cfg_path}")
+    st.stop()
+if not cfg_path.is_file():
+    st.error(f"Ожидался JSON-файл конфига, но указан каталог: {cfg_path}")
+    st.stop()
+
+try:
+    configured_nodes = _load_nodes_from_config(cfg_path)
+except Exception as exc:
+    st.error(f"Не удалось прочитать конфиг: {exc}")
+    st.stop()
+
 presentation_mode = st.toggle("🎬 Режим презентации", value=False, help="Крупный шрифт + скрытие второстепенных деталей")
 auto_scroll_timeline = st.toggle("Авто-скролл таймлайна", value=True)
+st.text_input("Путь к конфигу кластера", key="demo_playback_cfg_path")
 
 run_id = st.session_state.get("scenario_run_id")
 run: ScenarioRun | None = None
@@ -301,9 +344,9 @@ else:
 
 left, right = st.columns([1.25, 1])
 with left:
-    _render_topology_map(run, presentation_mode)
+    _render_topology_map(run, configured_nodes, presentation_mode)
 with right:
-    _, _, failover_detected, _ = _build_topology(run)
+    _, _, failover_detected, _ = _build_topology(run, configured_nodes)
     _render_slo_panel(run, failover_detected)
 
 c1, c2 = st.columns(2)
