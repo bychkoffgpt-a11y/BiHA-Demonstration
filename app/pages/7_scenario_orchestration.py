@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from orchestration.demo_runner import RunStatus, get_demo_runner
+from orchestration.demo_runner import RunStatus, get_demo_runner, get_scenario_catalog_status
 from orchestration.reporting import build_and_save_report_bundle, is_run_finished
 from ui_styles import apply_base_page_styles
 
@@ -14,6 +14,13 @@ st.title("Orchestration / Demo Runner")
 st.caption("Выполнение демонстрационных сценариев как цепочки шагов с тайм-аутами и проверкой состояния")
 
 runner = get_demo_runner()
+catalog_status = get_scenario_catalog_status()
+
+if catalog_status.error:
+    st.error(f"Ошибка загрузки сценариев: {catalog_status.error}")
+elif catalog_status.fallback_used:
+    st.warning("Каталог config/demo_scenarios пуст. Используется встроенный fallback-сценарий.")
+
 scenarios = runner.list_scenarios()
 
 if not scenarios:

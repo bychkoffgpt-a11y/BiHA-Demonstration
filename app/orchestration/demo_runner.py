@@ -4,11 +4,20 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Callable
 
 from .fault_injection import FaultInjectionController
+from .scenario_loader import ScenarioLoadError, load_scenarios_from_directory
+
+
+@dataclass(frozen=True)
+class ScenarioCatalogStatus:
+    loaded_from: str
+    fallback_used: bool
+    error: str | None = None
 
 
 class RunStatus(str, Enum):
@@ -324,11 +333,75 @@ def build_default_scenarios() -> list[Scenario]:
 
 _DEFAULT_RUNNER: DemoRunner | None = None
 _DEFAULT_RUNNER_LOCK = threading.Lock()
+_DEFAULT_SCENARIO_CATALOG_STATUS = ScenarioCatalogStatus(
+    loaded_from="defaults",
+    fallback_used=True,
+    error="Demo runner is not initialized yet",
+)
+
+
+def _load_scenarios_with_fallback() -> tuple[list[Scenario], ScenarioCatalogStatus]:
+    scenarios_dir = Path(__file__).resolve().parents[2] / "config" / "demo_scenarios"
+    try:
+        loaded_dto = load_scenarios_from_directory(scenarios_dir)
+        if not loaded_dto:
+            return (
+                build_default_scenarios(),
+                ScenarioCatalogStatus(
+                    loaded_from="defaults",
+                    fallback_used=True,
+                    error=None,
+                ),
+            )
+
+        loaded_scenarios = [
+            Scenario(
+                id=item.id,
+                name=item.name,
+                description=item.description,
+                steps=[
+                    Step(
+                        action_type=step.action_type,
+                        target_node=step.target_node,
+                        params=step.params,
+                        wait_condition=step.wait_condition,
+                        timeout=step.timeout,
+                        expected=step.expected,
+                    )
+                    for step in item.steps
+                ],
+                success_criteria=item.success_criteria,
+            )
+            for item in loaded_dto
+        ]
+        return (
+            loaded_scenarios,
+            ScenarioCatalogStatus(
+                loaded_from=str(scenarios_dir),
+                fallback_used=False,
+                error=None,
+            ),
+        )
+    except ScenarioLoadError as exc:
+        return (
+            build_default_scenarios(),
+            ScenarioCatalogStatus(
+                loaded_from="defaults",
+                fallback_used=True,
+                error=f"Failed to load YAML scenarios: {exc}",
+            ),
+        )
+
+
+def get_scenario_catalog_status() -> ScenarioCatalogStatus:
+    return _DEFAULT_SCENARIO_CATALOG_STATUS
 
 
 def get_demo_runner() -> DemoRunner:
-    global _DEFAULT_RUNNER
+    global _DEFAULT_RUNNER, _DEFAULT_SCENARIO_CATALOG_STATUS
     with _DEFAULT_RUNNER_LOCK:
         if _DEFAULT_RUNNER is None:
-            _DEFAULT_RUNNER = DemoRunner(build_default_scenarios())
+            scenarios, status = _load_scenarios_with_fallback()
+            _DEFAULT_RUNNER = DemoRunner(scenarios)
+            _DEFAULT_SCENARIO_CATALOG_STATUS = status
     return _DEFAULT_RUNNER
