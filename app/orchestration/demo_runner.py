@@ -271,21 +271,43 @@ class DemoRunner:
             step.wait_condition,
             step.expected,
         )
-        action_result = self.execute_action(step)
-        LOGGER.info(
-            "Step action executed | run_id=%s step=%s rollback_id=%s details=%s",
-            run_id,
-            step_index + 1,
-            action_result.get("rollback_id"),
-            action_result.get("fault_injection"),
-        )
-
         with self._lock:
             run = self._runs[run_id]
             run.current_step_index = step_index
             log = run.step_logs[step_index]
             log.status = "running"
             log.started_at = datetime.now(UTC)
+        try:
+            action_result = self.execute_action(step)
+        except Exception as exc:
+            with self._lock:
+                run = self._runs[run_id]
+                log = run.step_logs[step_index]
+                log.status = "failed"
+                log.error_reason = str(exc)
+                log.finished_at = datetime.now(UTC)
+                run.status = RunStatus.FAILED
+                run.error_reason = f"Step {step_index + 1} failed: {exc}"
+                run.finished_at = datetime.now(UTC)
+            LOGGER.exception(
+                "Step action failed | run_id=%s step=%s action=%s error=%s",
+                run_id,
+                step_index + 1,
+                step.action_type,
+                exc,
+            )
+            raise
+
+        LOGGER.info(
+            "Step action executed | run_id=%s step=%s rollback_id=%s details=%s",
+            run_id,
+            step_index + 1,
+            action_result.get("rollback_id"),
+            action_result.get("fault_injection") or action_result.get("orchestration"),
+        )
+        with self._lock:
+            run = self._runs[run_id]
+            log = run.step_logs[step_index]
             log.action_result = action_result
 
         observation = self.wait_until(step.wait_condition, step.timeout, cancel_event)
@@ -330,20 +352,11 @@ class DemoRunner:
     def execute_action(self, step: Step) -> dict[str, Any]:
         """Выполнение действия шага с fault-injection guardrails и rollback metadata."""
         action_type = step.action_type.lower().strip()
-        if action_type in ORCHESTRATION_ACTIONS or action_type not in FAULT_INJECTION_ACTIONS:
-            return {
-                "action_type": action_type,
-                "target_node": step.target_node,
-                "params": step.params,
-                "rollback_id": None,
-                "fault_injection": {
-                    "phase": "orchestration",
-                    "simulated": True,
-                    "step_name": step.params.get("step_name"),
-                    "details": step.params.get("details"),
-                },
-                "executed_at": datetime.now(UTC).isoformat(),
-            }
+        if action_type in ORCHESTRATION_ACTIONS:
+            return self._execute_orchestration_action(step, action_type)
+
+        if action_type not in FAULT_INJECTION_ACTIONS:
+            raise ValueError(f"Unknown action_type={action_type!r}")
 
         result = self._fault_injection.execute(
             action_type=action_type,
@@ -358,6 +371,75 @@ class DemoRunner:
             "fault_injection": result.details,
             "executed_at": datetime.now(UTC).isoformat(),
         }
+
+    def _execute_orchestration_action(self, step: Step, action_type: str) -> dict[str, Any]:
+        if self._is_explicit_demo_mode(step.params):
+            return {
+                "action_type": action_type,
+                "target_node": step.target_node,
+                "params": step.params,
+                "rollback_id": None,
+                "orchestration": {
+                    "phase": "orchestration",
+                    "simulated": True,
+                    "step_name": step.params.get("step_name"),
+                    "details": step.params.get("details"),
+                },
+                "executed_at": datetime.now(UTC).isoformat(),
+            }
+
+        if action_type == "switchover":
+            return self._execute_real_switchover(step)
+
+        raise NotImplementedError(
+            f"Orchestration action {action_type!r} requires explicit demo/mock mode "
+            "until real execution integration is implemented."
+        )
+
+    def _execute_real_switchover(self, step: Step) -> dict[str, Any]:
+        from cluster_demo import load_cluster_config, switchover_master_role
+
+        cluster_config_path = self._resolve_cluster_config_path(step.params)
+        cluster = load_cluster_config(cluster_config_path)
+        switchover_result = switchover_master_role(cluster)
+        roles = switchover_result.get("roles") or {}
+        old_leader = roles.get("slave")
+        new_leader = roles.get("master")
+        diagnostics = switchover_result.get("diagnostics") or []
+        messages = switchover_result.get("messages") or []
+        success = bool(switchover_result.get("success"))
+
+        action_result: dict[str, Any] = {
+            "action_type": "switchover",
+            "target_node": step.target_node,
+            "params": step.params,
+            "rollback_id": None,
+            "orchestration": {
+                "phase": "orchestration",
+                "simulated": False,
+                "cluster_config_path": str(cluster_config_path),
+                "success": success,
+                "old_leader": old_leader,
+                "new_leader": new_leader,
+                "diagnostics": diagnostics,
+                "messages": messages,
+            },
+            "executed_at": datetime.now(UTC).isoformat(),
+        }
+        if not success:
+            raise RuntimeError(f"Switchover failed: {messages}")
+        return action_result
+
+    @staticmethod
+    def _is_explicit_demo_mode(params: dict[str, Any]) -> bool:
+        return bool(params.get("demo_mode")) or bool(params.get("mock_mode"))
+
+    @staticmethod
+    def _resolve_cluster_config_path(params: dict[str, Any]) -> Path:
+        raw_path = params.get("cluster_config_path")
+        if raw_path:
+            return Path(str(raw_path)).expanduser().resolve()
+        return (Path(__file__).resolve().parents[2] / "config" / "cluster.example.json").resolve()
 
     def wait_until(
         self,
