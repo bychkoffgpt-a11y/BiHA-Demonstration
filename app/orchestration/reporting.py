@@ -7,6 +7,7 @@ import subprocess
 import zipfile
 from dataclasses import asdict
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +34,7 @@ def build_and_save_report_bundle(run: ScenarioRun) -> dict[str, Any]:
     logs_path = run_dir / "logs_export.json"
     version_path = run_dir / "version_info.json"
 
-    json_text = json.dumps(payload, ensure_ascii=False, indent=2)
+    json_text = json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default)
     json_path.write_text(json_text, encoding="utf-8")
 
     html_text = render_html_report(payload)
@@ -55,21 +56,30 @@ def build_and_save_report_bundle(run: ScenarioRun) -> dict[str, Any]:
             for log in run.step_logs
         ],
     }
-    metrics_path.write_text(json.dumps(metrics_export, ensure_ascii=False, indent=2), encoding="utf-8")
+    metrics_path.write_text(
+        json.dumps(metrics_export, ensure_ascii=False, indent=2, default=_json_default),
+        encoding="utf-8",
+    )
 
     logs_export = {
         "run_id": run.run_id,
         "scenario": run.scenario_name,
         "app_log_excerpt": _collect_log_excerpt(),
     }
-    logs_path.write_text(json.dumps(logs_export, ensure_ascii=False, indent=2), encoding="utf-8")
+    logs_path.write_text(
+        json.dumps(logs_export, ensure_ascii=False, indent=2, default=_json_default),
+        encoding="utf-8",
+    )
 
     version_info = {
         "generated_at": datetime.now(UTC).isoformat(),
         "software_version": _get_git_commit(),
         "cluster_config_version": _hash_first_existing([Path("config/cluster.json"), Path("config/cluster.example.json")]),
     }
-    version_path.write_text(json.dumps(version_info, ensure_ascii=False, indent=2), encoding="utf-8")
+    version_path.write_text(
+        json.dumps(version_info, ensure_ascii=False, indent=2, default=_json_default),
+        encoding="utf-8",
+    )
 
     bundle_path = run_dir / "report_bundle.zip"
     with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
@@ -162,6 +172,16 @@ def build_report_payload(run: ScenarioRun) -> dict[str, Any]:
         },
     }
     return payload
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Path):
+        return str(value)
+    return str(value)
 
 
 def render_html_report(payload: dict[str, Any]) -> str:
