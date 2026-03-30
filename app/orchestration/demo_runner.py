@@ -308,47 +308,53 @@ class DemoRunner:
             action_result.get("rollback_id"),
             action_result.get("fault_injection") or action_result.get("orchestration"),
         )
-        with self._lock:
-            run = self._runs[run_id]
-            log = run.step_logs[step_index]
-            log.action_result = action_result
-        self._record_run_metrics(run_id, step.action_type, action_result)
+        try:
+            with self._lock:
+                run = self._runs[run_id]
+                log = run.step_logs[step_index]
+                log.action_result = action_result
+            self._record_run_metrics(run_id, step.action_type, action_result)
 
-        observation = self.wait_until(
-            step.wait_condition,
-            step.timeout,
-            cancel_event,
-            observation_source=self._resolve_observation_source(run_id, step),
-        )
-        is_valid, actual_result, reason = self.validate(step.expected, observation)
+            observation = self.wait_until(
+                step.wait_condition,
+                step.timeout,
+                cancel_event,
+                observation_source=self._resolve_observation_source(run_id, step),
+            )
+            is_valid, actual_result, reason = self.validate(step.expected, observation)
 
-        with self._lock:
-            run = self._runs[run_id]
-            log = run.step_logs[step_index]
-            log.actual_result = actual_result
-            log.finished_at = datetime.now(UTC)
-            if is_valid:
-                log.status = "succeeded"
-                LOGGER.info(
-                    "Step execution succeeded | run_id=%s step=%s actual=%s",
-                    run_id,
-                    step_index + 1,
-                    actual_result,
-                )
-            else:
+            with self._lock:
+                run = self._runs[run_id]
+                log = run.step_logs[step_index]
+                log.actual_result = actual_result
+                log.finished_at = datetime.now(UTC)
+                if is_valid:
+                    log.status = "succeeded"
+                    LOGGER.info(
+                        "Step execution succeeded | run_id=%s step=%s actual=%s",
+                        run_id,
+                        step_index + 1,
+                        actual_result,
+                    )
+                else:
+                    raise RuntimeError(reason or "Step validation failed")
+        except Exception as exc:
+            with self._lock:
+                run = self._runs[run_id]
+                log = run.step_logs[step_index]
                 log.status = "failed"
-                log.error_reason = reason
+                log.error_reason = str(exc)
+                log.finished_at = datetime.now(UTC)
                 run.status = RunStatus.FAILED
-                run.error_reason = f"Step {step_index + 1} failed: {reason}"
+                run.error_reason = f"Step {step_index + 1} failed: {exc}"
                 run.finished_at = datetime.now(UTC)
-                LOGGER.error(
-                    "Step execution failed | run_id=%s step=%s reason=%s actual=%s",
-                    run_id,
-                    step_index + 1,
-                    reason,
-                    actual_result,
-                )
-                raise RuntimeError(run.error_reason)
+            LOGGER.exception(
+                "Step execution failed after action | run_id=%s step=%s error=%s",
+                run_id,
+                step_index + 1,
+                exc,
+            )
+            raise
 
     def _mark_cancelled(self, run_id: str, step_index: int, reason: str) -> None:
         with self._lock:
