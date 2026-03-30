@@ -1,0 +1,308 @@
+from __future__ import annotations
+
+import threading
+import time
+import uuid
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from enum import Enum
+from typing import Any, Callable
+
+
+class RunStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+@dataclass(frozen=True)
+class Observation:
+    timestamp: datetime
+    source: str
+    metric_event: str
+    value: Any
+
+
+@dataclass(frozen=True)
+class Step:
+    action_type: str
+    target_node: str
+    params: dict[str, Any] = field(default_factory=dict)
+    wait_condition: dict[str, Any] = field(default_factory=dict)
+    timeout: float = 10.0
+    expected: Any = None
+
+
+@dataclass(frozen=True)
+class Scenario:
+    id: str
+    name: str
+    description: str
+    steps: list[Step]
+    success_criteria: str
+
+
+@dataclass
+class StepRunLog:
+    index: int
+    action_type: str
+    target_node: str
+    expected_result: Any
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    action_result: Any = None
+    actual_result: Any = None
+    status: str = "pending"
+    error_reason: str | None = None
+
+
+@dataclass
+class ScenarioRun:
+    run_id: str
+    scenario_id: str
+    scenario_name: str
+    status: RunStatus
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    current_step_index: int = -1
+    error_reason: str | None = None
+    step_logs: list[StepRunLog] = field(default_factory=list)
+
+
+class DemoRunner:
+    """In-memory сценарный раннер с API запуска/остановки и журналом шагов."""
+
+    def __init__(self, scenarios: list[Scenario] | None = None) -> None:
+        self._scenarios: dict[str, Scenario] = {scenario.id: scenario for scenario in scenarios or []}
+        self._runs: dict[str, ScenarioRun] = {}
+        self._run_threads: dict[str, threading.Thread] = {}
+        self._cancel_events: dict[str, threading.Event] = {}
+        self._lock = threading.RLock()
+
+    def register_scenario(self, scenario: Scenario) -> None:
+        with self._lock:
+            self._scenarios[scenario.id] = scenario
+
+    def list_scenarios(self) -> list[Scenario]:
+        with self._lock:
+            return list(self._scenarios.values())
+
+    def start_scenario(self, scenario_id: str) -> str:
+        with self._lock:
+            scenario = self._scenarios.get(scenario_id)
+            if scenario is None:
+                raise ValueError(f"Unknown scenario_id: {scenario_id}")
+
+            run_id = str(uuid.uuid4())
+            run = ScenarioRun(
+                run_id=run_id,
+                scenario_id=scenario.id,
+                scenario_name=scenario.name,
+                status=RunStatus.PENDING,
+                created_at=datetime.now(UTC),
+                step_logs=[
+                    StepRunLog(
+                        index=index,
+                        action_type=step.action_type,
+                        target_node=step.target_node,
+                        expected_result=step.expected,
+                    )
+                    for index, step in enumerate(scenario.steps)
+                ],
+            )
+            self._runs[run_id] = run
+            cancel_event = threading.Event()
+            self._cancel_events[run_id] = cancel_event
+            thread = threading.Thread(
+                target=self._run_scenario,
+                args=(run_id, scenario, cancel_event),
+                name=f"scenario-run-{run_id[:8]}",
+                daemon=True,
+            )
+            self._run_threads[run_id] = thread
+            thread.start()
+            return run_id
+
+    def stop_scenario(self, run_id: str) -> None:
+        with self._lock:
+            cancel_event = self._cancel_events.get(run_id)
+            run = self._runs.get(run_id)
+            if cancel_event is None or run is None:
+                raise ValueError(f"Unknown run_id: {run_id}")
+            cancel_event.set()
+            if run.status in {RunStatus.PENDING, RunStatus.RUNNING}:
+                run.status = RunStatus.CANCELLED
+                run.finished_at = datetime.now(UTC)
+                run.error_reason = "Cancelled by user"
+
+    def get_run_status(self, run_id: str) -> ScenarioRun:
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None:
+                raise ValueError(f"Unknown run_id: {run_id}")
+            return run
+
+    def _run_scenario(self, run_id: str, scenario: Scenario, cancel_event: threading.Event) -> None:
+        with self._lock:
+            run = self._runs[run_id]
+            run.status = RunStatus.RUNNING
+            run.started_at = datetime.now(UTC)
+
+        try:
+            for step_index, step in enumerate(scenario.steps):
+                if cancel_event.is_set():
+                    self._mark_cancelled(run_id, step_index, "Cancelled before step execution")
+                    return
+
+                self._execute_step(run_id, step_index, step, cancel_event)
+
+            with self._lock:
+                run = self._runs[run_id]
+                if run.status not in {RunStatus.CANCELLED, RunStatus.FAILED}:
+                    run.status = RunStatus.SUCCEEDED
+                    run.finished_at = datetime.now(UTC)
+        except Exception as exc:
+            with self._lock:
+                run = self._runs[run_id]
+                run.status = RunStatus.FAILED
+                run.error_reason = str(exc)
+                run.finished_at = datetime.now(UTC)
+        finally:
+            with self._lock:
+                self._run_threads.pop(run_id, None)
+                self._cancel_events.pop(run_id, None)
+
+    def _execute_step(self, run_id: str, step_index: int, step: Step, cancel_event: threading.Event) -> None:
+        action_result = self.execute_action(step)
+
+        with self._lock:
+            run = self._runs[run_id]
+            run.current_step_index = step_index
+            log = run.step_logs[step_index]
+            log.status = "running"
+            log.started_at = datetime.now(UTC)
+            log.action_result = action_result
+
+        observation = self.wait_until(step.wait_condition, step.timeout, cancel_event)
+        is_valid, actual_result, reason = self.validate(step.expected, observation)
+
+        with self._lock:
+            run = self._runs[run_id]
+            log = run.step_logs[step_index]
+            log.actual_result = actual_result
+            log.finished_at = datetime.now(UTC)
+            if is_valid:
+                log.status = "succeeded"
+            else:
+                log.status = "failed"
+                log.error_reason = reason
+                run.status = RunStatus.FAILED
+                run.error_reason = f"Step {step_index + 1} failed: {reason}"
+                run.finished_at = datetime.now(UTC)
+                raise RuntimeError(run.error_reason)
+
+    def _mark_cancelled(self, run_id: str, step_index: int, reason: str) -> None:
+        with self._lock:
+            run = self._runs[run_id]
+            run.status = RunStatus.CANCELLED
+            run.current_step_index = step_index
+            run.error_reason = reason
+            run.finished_at = datetime.now(UTC)
+
+    def execute_action(self, step: Step) -> dict[str, Any]:
+        """Заглушка выполнения действий (ssh/sql/api) для шага сценария."""
+        return {
+            "action_type": step.action_type,
+            "target_node": step.target_node,
+            "params": step.params,
+            "executed_at": datetime.now(UTC).isoformat(),
+        }
+
+    def wait_until(
+        self,
+        condition: dict[str, Any],
+        timeout: float,
+        cancel_event: threading.Event,
+        observation_source: Callable[[], Observation] | None = None,
+    ) -> Observation:
+        """Ожидание условия до timeout с периодическим опросом."""
+        source_fn = observation_source or self._default_observation
+        deadline = time.monotonic() + timeout
+        expected_value = condition.get("equals")
+
+        while time.monotonic() < deadline:
+            if cancel_event.is_set():
+                raise RuntimeError("Step cancelled")
+            observation = source_fn()
+            if expected_value is None or observation.value == expected_value:
+                return observation
+            time.sleep(0.5)
+
+        raise TimeoutError(f"Step timeout after {timeout} sec waiting for condition={condition}")
+
+    def validate(self, expected: Any, observation: Observation) -> tuple[bool, Any, str | None]:
+        """Проверка результата шага на соответствие expected."""
+        actual = {
+            "timestamp": observation.timestamp.isoformat(),
+            "source": observation.source,
+            "metric_event": observation.metric_event,
+            "value": observation.value,
+        }
+        if expected is None:
+            return True, actual, None
+        if observation.value == expected:
+            return True, actual, None
+        return False, actual, f"expected={expected!r}, actual={observation.value!r}"
+
+    @staticmethod
+    def _default_observation() -> Observation:
+        return Observation(
+            timestamp=datetime.now(UTC),
+            source="demo-runner",
+            metric_event="state",
+            value="ok",
+        )
+
+
+def build_default_scenarios() -> list[Scenario]:
+    return [
+        Scenario(
+            id="failover-smoke",
+            name="Failover smoke test",
+            description="Проверка сценария перезапуска standby и валидации восстановления репликации.",
+            success_criteria="Все шаги завершились без тайм-аутов и с ожидаемыми observation.value.",
+            steps=[
+                Step(
+                    action_type="service_restart",
+                    target_node="pg-node-2",
+                    params={"service": "postgrespro"},
+                    wait_condition={"equals": "ok"},
+                    timeout=15,
+                    expected="ok",
+                ),
+                Step(
+                    action_type="replication_check",
+                    target_node="pg-node-1",
+                    params={"max_lag_sec": 5},
+                    wait_condition={"equals": "ok"},
+                    timeout=20,
+                    expected="ok",
+                ),
+            ],
+        )
+    ]
+
+
+_DEFAULT_RUNNER: DemoRunner | None = None
+_DEFAULT_RUNNER_LOCK = threading.Lock()
+
+
+def get_demo_runner() -> DemoRunner:
+    global _DEFAULT_RUNNER
+    with _DEFAULT_RUNNER_LOCK:
+        if _DEFAULT_RUNNER is None:
+            _DEFAULT_RUNNER = DemoRunner(build_default_scenarios())
+    return _DEFAULT_RUNNER
