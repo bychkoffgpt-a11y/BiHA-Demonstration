@@ -7,9 +7,12 @@ from .demo_runner import (
     Step,
     get_demo_runner,
 )
+from .fault_injection import ALLOWED_ACTIONS, FaultInjectionController
 
 __all__ = [
+    "ALLOWED_ACTIONS",
     "DemoRunner",
+    "FaultInjectionController",
     "Observation",
     "RunStatus",
     "Scenario",

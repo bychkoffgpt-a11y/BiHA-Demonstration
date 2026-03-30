@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Callable
 
+from .fault_injection import FaultInjectionController
+
 
 class RunStatus(str, Enum):
     PENDING = "pending"
@@ -75,11 +77,18 @@ class ScenarioRun:
 class DemoRunner:
     """In-memory сценарный раннер с API запуска/остановки и журналом шагов."""
 
-    def __init__(self, scenarios: list[Scenario] | None = None) -> None:
+    def __init__(
+        self,
+        scenarios: list[Scenario] | None = None,
+        max_injection_duration_sec: float = 30.0,
+        scenario_timeout_sec: float = 120.0,
+    ) -> None:
         self._scenarios: dict[str, Scenario] = {scenario.id: scenario for scenario in scenarios or []}
         self._runs: dict[str, ScenarioRun] = {}
         self._run_threads: dict[str, threading.Thread] = {}
         self._cancel_events: dict[str, threading.Event] = {}
+        self._scenario_timeout_sec = scenario_timeout_sec
+        self._fault_injection = FaultInjectionController(max_injection_duration_sec=max_injection_duration_sec)
         self._lock = threading.RLock()
 
     def register_scenario(self, scenario: Scenario) -> None:
@@ -146,6 +155,7 @@ class DemoRunner:
             return run
 
     def _run_scenario(self, run_id: str, scenario: Scenario, cancel_event: threading.Event) -> None:
+        scenario_started_monotonic = time.monotonic()
         with self._lock:
             run = self._runs[run_id]
             run.status = RunStatus.RUNNING
@@ -153,8 +163,15 @@ class DemoRunner:
 
         try:
             for step_index, step in enumerate(scenario.steps):
+                if time.monotonic() - scenario_started_monotonic > self._scenario_timeout_sec:
+                    rollback_summary = self._fault_injection.rollback()
+                    raise TimeoutError(
+                        f"Scenario timeout after {self._scenario_timeout_sec} sec. "
+                        f"Automatic rollback executed: {rollback_summary}"
+                    )
                 if cancel_event.is_set():
                     self._mark_cancelled(run_id, step_index, "Cancelled before step execution")
+                    self._fault_injection.rollback()
                     return
 
                 self._execute_step(run_id, step_index, step, cancel_event)
@@ -164,11 +181,13 @@ class DemoRunner:
                 if run.status not in {RunStatus.CANCELLED, RunStatus.FAILED}:
                     run.status = RunStatus.SUCCEEDED
                     run.finished_at = datetime.now(UTC)
+            self._fault_injection.rollback()
         except Exception as exc:
+            rollback_summary = self._fault_injection.rollback()
             with self._lock:
                 run = self._runs[run_id]
                 run.status = RunStatus.FAILED
-                run.error_reason = str(exc)
+                run.error_reason = f"{exc}; rollback={rollback_summary}"
                 run.finished_at = datetime.now(UTC)
         finally:
             with self._lock:
@@ -213,11 +232,18 @@ class DemoRunner:
             run.finished_at = datetime.now(UTC)
 
     def execute_action(self, step: Step) -> dict[str, Any]:
-        """Заглушка выполнения действий (ssh/sql/api) для шага сценария."""
+        """Выполнение действия шага с fault-injection guardrails и rollback metadata."""
+        result = self._fault_injection.execute(
+            action_type=step.action_type,
+            target_node=step.target_node,
+            params=step.params,
+        )
         return {
-            "action_type": step.action_type,
+            "action_type": result.action_type,
             "target_node": step.target_node,
             "params": step.params,
+            "rollback_id": result.rollback_id,
+            "fault_injection": result.details,
             "executed_at": datetime.now(UTC).isoformat(),
         }
 
@@ -276,17 +302,17 @@ def build_default_scenarios() -> list[Scenario]:
             success_criteria="Все шаги завершились без тайм-аутов и с ожидаемыми observation.value.",
             steps=[
                 Step(
-                    action_type="service_restart",
+                    action_type="stop_db_service",
                     target_node="pg-node-2",
-                    params={"service": "postgrespro"},
+                    params={"service": "postgrespro", "environment": "demo", "demo_mode": True},
                     wait_condition={"equals": "ok"},
                     timeout=15,
                     expected="ok",
                 ),
                 Step(
-                    action_type="replication_check",
-                    target_node="pg-node-1",
-                    params={"max_lag_sec": 5},
+                    action_type="recover_action",
+                    target_node="pg-node-2",
+                    params={"environment": "demo", "demo_mode": True},
                     wait_condition={"equals": "ok"},
                     timeout=20,
                     expected="ok",
