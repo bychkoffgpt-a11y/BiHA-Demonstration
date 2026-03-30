@@ -9,8 +9,12 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Callable
 
+from logging_utils import setup_file_logger
+
 from .fault_injection import FaultInjectionController
 from .scenario_loader import ScenarioLoadError, load_scenarios_from_directory
+
+LOGGER = setup_file_logger()
 
 
 @dataclass(frozen=True)
@@ -142,6 +146,13 @@ class DemoRunner:
             )
             self._run_threads[run_id] = thread
             thread.start()
+            LOGGER.info(
+                "Scenario run started | run_id=%s scenario_id=%s scenario_name=%s steps=%s",
+                run_id,
+                scenario.id,
+                scenario.name,
+                len(scenario.steps),
+            )
             return run_id
 
     def stop_scenario(self, run_id: str) -> None:
@@ -169,18 +180,35 @@ class DemoRunner:
             run = self._runs[run_id]
             run.status = RunStatus.RUNNING
             run.started_at = datetime.now(UTC)
+        LOGGER.info(
+            "Scenario execution entered RUNNING state | run_id=%s scenario_id=%s",
+            run_id,
+            scenario.id,
+        )
 
         try:
             for step_index, step in enumerate(scenario.steps):
                 if time.monotonic() - scenario_started_monotonic > self._scenario_timeout_sec:
                     rollback_summary = self._fault_injection.rollback()
+                    LOGGER.error(
+                        "Scenario timeout reached | run_id=%s timeout_sec=%s rollback=%s",
+                        run_id,
+                        self._scenario_timeout_sec,
+                        rollback_summary,
+                    )
                     raise TimeoutError(
                         f"Scenario timeout after {self._scenario_timeout_sec} sec. "
                         f"Automatic rollback executed: {rollback_summary}"
                     )
                 if cancel_event.is_set():
                     self._mark_cancelled(run_id, step_index, "Cancelled before step execution")
-                    self._fault_injection.rollback()
+                    rollback_summary = self._fault_injection.rollback()
+                    LOGGER.warning(
+                        "Scenario cancelled before step execution | run_id=%s step=%s rollback=%s",
+                        run_id,
+                        step_index + 1,
+                        rollback_summary,
+                    )
                     return
 
                 self._execute_step(run_id, step_index, step, cancel_event)
@@ -190,7 +218,12 @@ class DemoRunner:
                 if run.status not in {RunStatus.CANCELLED, RunStatus.FAILED}:
                     run.status = RunStatus.SUCCEEDED
                     run.finished_at = datetime.now(UTC)
-            self._fault_injection.rollback()
+            rollback_summary = self._fault_injection.rollback()
+            LOGGER.info(
+                "Scenario finished successfully | run_id=%s rollback=%s",
+                run_id,
+                rollback_summary,
+            )
         except Exception as exc:
             rollback_summary = self._fault_injection.rollback()
             with self._lock:
@@ -198,13 +231,38 @@ class DemoRunner:
                 run.status = RunStatus.FAILED
                 run.error_reason = f"{exc}; rollback={rollback_summary}"
                 run.finished_at = datetime.now(UTC)
+            LOGGER.exception(
+                "Scenario failed | run_id=%s scenario_id=%s error=%s rollback=%s",
+                run_id,
+                scenario.id,
+                exc,
+                rollback_summary,
+            )
         finally:
             with self._lock:
                 self._run_threads.pop(run_id, None)
                 self._cancel_events.pop(run_id, None)
+            LOGGER.info("Scenario execution finalized | run_id=%s", run_id)
 
     def _execute_step(self, run_id: str, step_index: int, step: Step, cancel_event: threading.Event) -> None:
+        LOGGER.info(
+            "Step execution started | run_id=%s step=%s action=%s target=%s timeout=%s wait_condition=%s expected=%r",
+            run_id,
+            step_index + 1,
+            step.action_type,
+            step.target_node,
+            step.timeout,
+            step.wait_condition,
+            step.expected,
+        )
         action_result = self.execute_action(step)
+        LOGGER.info(
+            "Step action executed | run_id=%s step=%s rollback_id=%s details=%s",
+            run_id,
+            step_index + 1,
+            action_result.get("rollback_id"),
+            action_result.get("fault_injection"),
+        )
 
         with self._lock:
             run = self._runs[run_id]
@@ -224,12 +282,25 @@ class DemoRunner:
             log.finished_at = datetime.now(UTC)
             if is_valid:
                 log.status = "succeeded"
+                LOGGER.info(
+                    "Step execution succeeded | run_id=%s step=%s actual=%s",
+                    run_id,
+                    step_index + 1,
+                    actual_result,
+                )
             else:
                 log.status = "failed"
                 log.error_reason = reason
                 run.status = RunStatus.FAILED
                 run.error_reason = f"Step {step_index + 1} failed: {reason}"
                 run.finished_at = datetime.now(UTC)
+                LOGGER.error(
+                    "Step execution failed | run_id=%s step=%s reason=%s actual=%s",
+                    run_id,
+                    step_index + 1,
+                    reason,
+                    actual_result,
+                )
                 raise RuntimeError(run.error_reason)
 
     def _mark_cancelled(self, run_id: str, step_index: int, reason: str) -> None:
@@ -267,15 +338,29 @@ class DemoRunner:
         source_fn = observation_source or self._default_observation
         deadline = time.monotonic() + timeout
         expected_value = condition.get("equals")
+        LOGGER.info(
+            "Waiting for condition | expected=%r timeout_sec=%s condition=%s",
+            expected_value,
+            timeout,
+            condition,
+        )
 
         while time.monotonic() < deadline:
             if cancel_event.is_set():
+                LOGGER.warning("Step wait cancelled by event")
                 raise RuntimeError("Step cancelled")
             observation = source_fn()
             if expected_value is None or observation.value == expected_value:
+                LOGGER.info("Condition met | observed_value=%r source=%s", observation.value, observation.source)
                 return observation
             time.sleep(0.5)
 
+        LOGGER.error(
+            "Step wait timeout | timeout_sec=%s expected=%r condition=%s",
+            timeout,
+            expected_value,
+            condition,
+        )
         raise TimeoutError(f"Step timeout after {timeout} sec waiting for condition={condition}")
 
     def validate(self, expected: Any, observation: Observation) -> tuple[bool, Any, str | None]:
