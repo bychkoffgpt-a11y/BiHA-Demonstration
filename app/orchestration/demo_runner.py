@@ -16,6 +16,13 @@ from .scenario_loader import ScenarioLoadError, load_scenarios_from_directory
 
 LOGGER = setup_file_logger()
 
+ORCHESTRATION_ACTIONS = {
+    "check_cluster_health",
+    "switchover",
+    "verify_roles",
+    "verify_availability",
+}
+
 
 @dataclass(frozen=True)
 class ScenarioCatalogStatus:
@@ -313,8 +320,24 @@ class DemoRunner:
 
     def execute_action(self, step: Step) -> dict[str, Any]:
         """Выполнение действия шага с fault-injection guardrails и rollback metadata."""
+        action_type = step.action_type.lower().strip()
+        if action_type in ORCHESTRATION_ACTIONS:
+            return {
+                "action_type": action_type,
+                "target_node": step.target_node,
+                "params": step.params,
+                "rollback_id": None,
+                "fault_injection": {
+                    "phase": "orchestration",
+                    "simulated": True,
+                    "step_name": step.params.get("step_name"),
+                    "details": step.params.get("details"),
+                },
+                "executed_at": datetime.now(UTC).isoformat(),
+            }
+
         result = self._fault_injection.execute(
-            action_type=step.action_type,
+            action_type=action_type,
             target_node=step.target_node,
             params=step.params,
         )
