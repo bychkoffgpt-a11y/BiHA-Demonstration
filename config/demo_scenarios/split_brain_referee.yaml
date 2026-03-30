@@ -1,0 +1,21 @@
+id: split_brain_referee
+name: Split-brain prevention with quorum/referee
+description: >-
+  Проверка предотвращения split-brain при сетевом разделении зон.
+steps:
+  - name: create_network_partition
+    action: network_partition
+    details: Разделить кластер на зоны с потерей связности между группами узлов.
+  - name: evaluate_quorum_decision
+    action: check_quorum
+    details: Проверить решения quorum/referee по выбору стороны с правом записи.
+  - name: verify_write_permissions
+    action: verify_write_side
+    details: Проверить, что writes разрешены только на одной стороне.
+  - name: verify_promotion_block
+    action: verify_promotion_block
+    details: Проверить, что вторая сторона блокирует promotion и не принимает writes.
+success_criteria:
+  - Только одна сторона принимает writes.
+  - Вторая сторона не промотируется в лидера.
+  - Split-brain не возникает.
