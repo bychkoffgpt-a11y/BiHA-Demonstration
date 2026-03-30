@@ -536,13 +536,29 @@ class DemoRunner:
         return self._observe_default
 
     def _observe_cluster_health(self, step: Step) -> Observation:
+        from cluster_demo import classify_node_role
+
         cluster_state = self._fetch_cluster_state(step)
         up_nodes = [row.get("node") for row in cluster_state["rows"] if str(row.get("status")).lower() == "up"]
+        masters = [
+            str(row.get("node"))
+            for row in cluster_state["rows"]
+            if classify_node_role(row.get("role"), row.get("tx_read_only")) == "master"
+        ]
+        slaves = [
+            str(row.get("node"))
+            for row in cluster_state["rows"]
+            if classify_node_role(row.get("role"), row.get("tx_read_only")) == "slave"
+        ]
         value = {
             "cluster_config_path": str(cluster_state["cluster_config_path"]),
             "up_nodes": up_nodes,
             "total_nodes": len(cluster_state["rows"]),
             "all_nodes_up": len(up_nodes) == len(cluster_state["rows"]) and bool(cluster_state["rows"]),
+            "current_roles": {
+                "master": masters[0] if len(masters) == 1 else None,
+                "slave": slaves[0] if len(slaves) == 1 else None,
+            },
         }
         return Observation(
             timestamp=datetime.now(UTC),
