@@ -8,6 +8,22 @@ steps:
     details: Подтвердить готовность к switchover (здоровье и синхронность).
     params:
       cluster_config_path: config/cluster.json
+    wait_condition:
+      all_nodes_up:
+        equals: true
+      current_roles:
+        master:
+          equals: pg-node-1
+        slave:
+          equals: pg-node-2
+    expected:
+      all_nodes_up:
+        equals: true
+      current_roles:
+        master:
+          equals: pg-node-1
+        slave:
+          equals: pg-node-2
   - name: execute_switchover
     action: switchover
     details: Выполнить команду switchover с текущего лидера на выбранную реплику.
