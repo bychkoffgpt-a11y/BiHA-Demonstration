@@ -111,13 +111,16 @@ def build_report_payload(run: ScenarioRun) -> dict[str, Any]:
     recovery_finished_at = next((step.finished_at for step in recovery_steps if step.finished_at), finished_at)
     estimated_downtime_sec = max((recovery_finished_at - disruption_started_at).total_seconds(), 0.0)
 
+    execution_mode = _resolve_execution_mode(run)
+    verification_artifacts = _collect_verification_artifacts(run)
+
     rto_sec = estimated_downtime_sec
-    rpo_estimate = "0 (demo observation, no data-loss evidence in step checks)" if run.status == RunStatus.SUCCEEDED else "unknown"
-    availability = 1.0 if duration_sec == 0 else max(0.0, min(1.0, (duration_sec - estimated_downtime_sec) / duration_sec))
+    rpo_estimate = _derive_rpo_estimate(verification_artifacts)
+    availability = _derive_availability_ratio(verification_artifacts)
 
     role_changes = []
     for step in run.step_logs:
-        if any(token in step.action_type for token in ("promote", "demote", "recover", "rewind", "failover")):
+        if any(token in step.action_type for token in ("promote", "demote", "recover", "rewind", "failover", "switchover")):
             role_changes.append(
                 {
                     "timestamp": _iso(step.finished_at or step.started_at),
@@ -127,7 +130,7 @@ def build_report_payload(run: ScenarioRun) -> dict[str, Any]:
                 }
             )
 
-    anti_split_brain_confirmed = not any("dual-primary" in (step.error_reason or "") for step in run.step_logs)
+    anti_split_brain_confirmed = _derive_anti_split_brain_status(verification_artifacts)
     old_leader_recovery = _derive_old_leader_recovery_status(run)
 
     payload = {
@@ -139,6 +142,7 @@ def build_report_payload(run: ScenarioRun) -> dict[str, Any]:
             "summary": {
                 "verdict": "PASS" if run.status == RunStatus.SUCCEEDED else "FAIL",
                 "status": run.status.value,
+                "execution_mode": execution_mode,
                 "error_reason": run.error_reason,
                 "started_at": _iso(run.started_at),
                 "finished_at": _iso(run.finished_at),
@@ -146,7 +150,7 @@ def build_report_payload(run: ScenarioRun) -> dict[str, Any]:
             "rto_rpo_availability": {
                 "rto_sec": round(rto_sec, 3),
                 "rpo_estimate": rpo_estimate,
-                "availability_ratio": round(availability, 4),
+                "availability_ratio": round(availability, 4) if isinstance(availability, float) else "unknown",
                 "total_duration_sec": round(duration_sec, 3),
                 "estimated_downtime_sec": round(estimated_downtime_sec, 3),
             },
@@ -154,15 +158,18 @@ def build_report_payload(run: ScenarioRun) -> dict[str, Any]:
             "node_role_changes": role_changes,
             "anti_split_brain_logic": {
                 "confirmed": anti_split_brain_confirmed,
-                "evidence": "No split-brain indicators found in step errors and all guardrail checks completed."
-                if anti_split_brain_confirmed
-                else "Potential split-brain indicator detected in step errors.",
+                "evidence": "Role snapshots consistently show a single master and no dual-primary indicators."
+                if anti_split_brain_confirmed is True
+                else "Not enough role verification evidence to confirm anti split-brain."
+                if anti_split_brain_confirmed == "not_verified"
+                else "Potential split-brain indicator detected in role snapshots or step errors.",
             },
             "old_leader_rewind_recovery": old_leader_recovery,
             "artifacts": {
                 "screenshots": [str(path) for path in _collect_screenshot_paths()],
                 "metrics_export": "metrics_export.json",
                 "logs_export": "logs_export.json",
+                "verification_artifacts": verification_artifacts,
                 "version_identifier": {
                     "software_version": _get_git_commit(),
                     "cluster_config_version": _hash_first_existing([Path("config/cluster.json"), Path("config/cluster.example.json")]),
@@ -214,6 +221,7 @@ def render_html_report(payload: dict[str, Any]) -> str:
     <h2>Summary</h2>
     <p class=\"badge\">{html.escape(sections['summary']['verdict'])}</p>
     <p>Статус: {html.escape(sections['summary']['status'])}</p>
+    <p>Execution mode: {html.escape(str(sections['summary']['execution_mode']))}</p>
     <p>Причина: {html.escape(str(sections['summary']['error_reason']))}</p>
   </section>
   <section>
@@ -251,6 +259,7 @@ def render_pdf_report(payload: dict[str, Any]) -> bytes:
         f"Run report: {payload['run_id']}",
         f"Scenario: {payload['scenario_name']}",
         f"Summary: {sections['summary']['verdict']} ({sections['summary']['status']})",
+        f"Execution mode: {sections['summary']['execution_mode']}",
         f"RTO sec: {sections['rto_rpo_availability']['rto_sec']}",
         f"RPO: {sections['rto_rpo_availability']['rpo_estimate']}",
         f"Availability: {sections['rto_rpo_availability']['availability_ratio']}",
@@ -314,6 +323,165 @@ def _derive_old_leader_recovery_status(run: ScenarioRun) -> dict[str, Any]:
             "details": f"{len(failed)} шаг(ов) rewind/recovery завершились неуспешно.",
         }
     return {"status": "completed", "details": "Все шаги rewind/recovery старого лидера завершились успешно."}
+
+
+def _resolve_execution_mode(run: ScenarioRun) -> str:
+    simulated_flags: list[bool] = []
+    for step in run.step_logs:
+        if isinstance(step.action_result, dict):
+            orchestration = step.action_result.get("orchestration")
+            if isinstance(orchestration, dict) and isinstance(orchestration.get("simulated"), bool):
+                simulated_flags.append(bool(orchestration["simulated"]))
+    if not simulated_flags:
+        return "simulated"
+    return "real" if all(flag is False for flag in simulated_flags) else "simulated"
+
+
+def _collect_verification_artifacts(run: ScenarioRun) -> dict[str, Any]:
+    artifacts: dict[str, Any] = {
+        "role_snapshots": {"before": None, "after": None, "timeline": []},
+        "replication_lag": [],
+        "availability_checks": [],
+        "connection_errors": [],
+        "sql_checks": [],
+        "ssh_checks": [],
+    }
+    for step in run.step_logs:
+        action_result = step.action_result if isinstance(step.action_result, dict) else {}
+        actual_result = step.actual_result if isinstance(step.actual_result, dict) else {}
+        value = actual_result.get("value") if isinstance(actual_result.get("value"), dict) else {}
+
+        if step.error_reason:
+            artifacts["connection_errors"].append(
+                {
+                    "step": step.index + 1,
+                    "action": step.action_type,
+                    "node": step.target_node,
+                    "error": step.error_reason,
+                }
+            )
+
+        if isinstance(value.get("current_roles"), dict):
+            snapshot = {
+                "timestamp": _iso(step.finished_at or step.started_at),
+                "step": step.index + 1,
+                "action": step.action_type,
+                "roles": value["current_roles"],
+            }
+            artifacts["role_snapshots"]["timeline"].append(snapshot)
+            if artifacts["role_snapshots"]["before"] is None:
+                artifacts["role_snapshots"]["before"] = snapshot
+            artifacts["role_snapshots"]["after"] = snapshot
+
+        if isinstance(action_result.get("orchestration"), dict):
+            orchestration = action_result["orchestration"]
+            if "old_leader" in orchestration or "new_leader" in orchestration:
+                artifacts["role_snapshots"]["timeline"].append(
+                    {
+                        "timestamp": _iso(step.finished_at or step.started_at),
+                        "step": step.index + 1,
+                        "action": step.action_type,
+                        "roles": {
+                            "master": orchestration.get("new_leader"),
+                            "slave": orchestration.get("old_leader"),
+                        },
+                    }
+                )
+            diagnostics = orchestration.get("diagnostics")
+            if isinstance(diagnostics, list):
+                for row in diagnostics:
+                    if isinstance(row, dict) and row.get("error"):
+                        artifacts["connection_errors"].append(
+                            {
+                                "step": step.index + 1,
+                                "action": step.action_type,
+                                "node": row.get("node"),
+                                "error": row.get("error"),
+                            }
+                        )
+
+        lag_value = _extract_lag_value(value)
+        if lag_value is not None:
+            artifacts["replication_lag"].append(
+                {
+                    "timestamp": _iso(step.finished_at or step.started_at),
+                    "step": step.index + 1,
+                    "action": step.action_type,
+                    "lag_sec": lag_value,
+                }
+            )
+        if isinstance(value.get("availability_ratio"), (int, float)):
+            artifacts["availability_checks"].append(
+                {
+                    "timestamp": _iso(step.finished_at or step.started_at),
+                    "step": step.index + 1,
+                    "action": step.action_type,
+                    "availability_ratio": float(value["availability_ratio"]),
+                }
+            )
+
+        source = str(actual_result.get("source") or "").lower()
+        if "sql" in source:
+            artifacts["sql_checks"].append(
+                {"step": step.index + 1, "action": step.action_type, "status": step.status, "result": actual_result}
+            )
+        if "ssh" in source:
+            artifacts["ssh_checks"].append(
+                {"step": step.index + 1, "action": step.action_type, "status": step.status, "result": actual_result}
+            )
+
+    return artifacts
+
+
+def _extract_lag_value(value: dict[str, Any]) -> float | None:
+    for key in ("replay_lag_sec", "replication_lag_sec", "lag_sec"):
+        metric = value.get(key)
+        if isinstance(metric, (int, float)):
+            return float(metric)
+    return None
+
+
+def _derive_rpo_estimate(verification_artifacts: dict[str, Any]) -> str:
+    lag_samples = verification_artifacts.get("replication_lag", [])
+    if not isinstance(lag_samples, list) or not lag_samples:
+        return "unknown"
+    lag_values = [sample.get("lag_sec") for sample in lag_samples if isinstance(sample, dict)]
+    numeric = [float(item) for item in lag_values if isinstance(item, (int, float))]
+    if not numeric:
+        return "unknown"
+    return f"≤ {max(numeric):.3f} sec (derived from replication lag checks)"
+
+
+def _derive_availability_ratio(verification_artifacts: dict[str, Any]) -> float | str:
+    availability_samples = verification_artifacts.get("availability_checks", [])
+    if not isinstance(availability_samples, list):
+        return "unknown"
+    numeric = [
+        float(sample.get("availability_ratio"))
+        for sample in availability_samples
+        if isinstance(sample, dict) and isinstance(sample.get("availability_ratio"), (int, float))
+    ]
+    if not numeric:
+        return "unknown"
+    latest_sample = numeric[-1]
+    return max(0.0, min(1.0, latest_sample))
+
+
+def _derive_anti_split_brain_status(verification_artifacts: dict[str, Any]) -> bool | str:
+    role_timeline = verification_artifacts.get("role_snapshots", {}).get("timeline", [])
+    if not isinstance(role_timeline, list) or not role_timeline:
+        return "not_verified"
+    for snapshot in role_timeline:
+        if not isinstance(snapshot, dict):
+            continue
+        roles = snapshot.get("roles")
+        if not isinstance(roles, dict):
+            continue
+        masters = roles.get("masters")
+        if isinstance(masters, list) and len(masters) > 1:
+            return False
+    has_connection_errors = bool(verification_artifacts.get("connection_errors"))
+    return False if has_connection_errors else True
 
 
 def _build_timeline(run: ScenarioRun) -> list[dict[str, Any]]:
