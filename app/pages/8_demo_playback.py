@@ -270,6 +270,23 @@ def _render_slo_panel(run: ScenarioRun | None, failover_detected: bool) -> None:
     c4.metric("Last successful commit", last_commit)
 
 
+def _render_scenario_description_modal(selected_scenario) -> None:
+    @st.dialog(f"ℹ️ {selected_scenario.name}", width="large")
+    def _scenario_details_dialog() -> None:
+        st.markdown(selected_scenario.description or "Описание сценария не задано.")
+        st.markdown(f"**Критерий успеха:** {selected_scenario.success_criteria}")
+
+        if selected_scenario.steps:
+            st.markdown("**План выполнения:**")
+            for index, step in enumerate(selected_scenario.steps, start=1):
+                st.markdown(f"{index}. `{step.action_type}` на `{step.target_node}`")
+
+        if st.button("Закрыть", key="close_scenario_details"):
+            st.session_state["show_scenario_details"] = False
+            st.rerun()
+
+    _scenario_details_dialog()
+
 def _render_event_feed(run: ScenarioRun | None, failover_detected: bool, presentation_mode: bool) -> None:
     st.subheader("Event Feed")
     events: list[str] = []
@@ -322,8 +339,19 @@ elif catalog_status.fallback_used:
 scenarios = runner.list_scenarios()
 if scenarios:
     scenario_options = {f"{scenario.name} ({scenario.id})": scenario for scenario in scenarios}
-    selected_label = st.selectbox("Сценарий для запуска", options=list(scenario_options.keys()))
+
+    scenario_header_col, scenario_help_col = st.columns([25, 1])
+    with scenario_header_col:
+        st.markdown("**Сценарии для запуска**")
+    with scenario_help_col:
+        if st.button("?", key="scenario_description_help", help="Показать подробное описание сценария"):
+            st.session_state["show_scenario_details"] = True
+
+    selected_label = st.selectbox("Сценарии для запуска", options=list(scenario_options.keys()), label_visibility="collapsed")
     selected_scenario = scenario_options[selected_label]
+
+    if st.session_state.get("show_scenario_details", False):
+        _render_scenario_description_modal(selected_scenario)
 
     st.caption(
         f"Источник сценариев: {catalog_status.loaded_from}. Загружено: {len(scenarios)}."
