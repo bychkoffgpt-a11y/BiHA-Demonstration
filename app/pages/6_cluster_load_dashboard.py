@@ -892,7 +892,7 @@ def render_dashboard() -> None:
     st.session_state.setdefault("cluster_dashboard_cfg_path", "config/cluster.json")
     st.session_state.setdefault("cluster_dashboard_target_db", "postgres")
     st.session_state.setdefault("cluster_dashboard_auto_refresh", True)
-    st.session_state.setdefault("cluster_dashboard_interval_sec", 10)
+    st.session_state.setdefault("cluster_dashboard_interval_sec", 2)
     st.session_state.setdefault("cluster_dashboard_window_minutes", 30)
     st.session_state.setdefault("cluster_dashboard_compact_grid", False)
 
@@ -1009,7 +1009,7 @@ def render_dashboard() -> None:
                 with col:
                     chart_renderer()
 
-    live_dashboard_fragment = st.fragment(render_live_dashboard_section, run_every=1 if auto_refresh else None)
+    live_dashboard_fragment = st.fragment(render_live_dashboard_section, run_every=2 if auto_refresh else None)
     live_dashboard_fragment()
 
     st.divider()
@@ -1018,7 +1018,7 @@ def render_dashboard() -> None:
     controls_col1.checkbox("Автообновление", key="cluster_dashboard_auto_refresh")
     controls_col2.select_slider(
         "Шаг агрегации (сек)",
-        options=[5, 10, 15, 30],
+        options=[2, 5, 10, 15, 30],
         key="cluster_dashboard_interval_sec",
     )
     controls_col3.select_slider(
