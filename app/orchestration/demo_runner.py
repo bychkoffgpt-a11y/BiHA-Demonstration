@@ -462,9 +462,12 @@ class DemoRunner:
     @staticmethod
     def _resolve_cluster_config_path(params: dict[str, Any]) -> Path:
         raw_path = params.get("cluster_config_path")
-        if raw_path:
-            return Path(str(raw_path)).expanduser().resolve()
-        return (Path(__file__).resolve().parents[2] / "config" / "cluster.example.json").resolve()
+        if not raw_path:
+            raise ValueError(
+                "cluster_config_path is required for orchestration steps. "
+                "Set params.cluster_config_path in the scenario YAML."
+            )
+        return Path(str(raw_path)).expanduser().resolve()
 
     def wait_until(
         self,
