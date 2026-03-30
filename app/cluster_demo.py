@@ -1056,11 +1056,12 @@ def run_node_action(node: NodeConfig, action: str) -> tuple[bool, str]:
         return False, f"Unknown action: {action}"
 
     cmd = build_ssh_command(node, remote_cmd)
+    command_rendered = shlex.join(cmd)
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
     except subprocess.TimeoutExpired:
         LOGGER.error("SSH action timeout for node=%s action=%s host=%s", node.name, action, node.ssh_host)
-        return False, "SSH command timeout"
+        return False, f"SSH command timeout\nCommand: {command_rendered}"
 
     output = (proc.stdout + "\n" + proc.stderr).strip()
     ok = proc.returncode == 0
@@ -1075,7 +1076,8 @@ def run_node_action(node: NodeConfig, action: str) -> tuple[bool, str]:
             proc.returncode,
             output or "<empty>",
         )
-    return ok, output or "OK"
+    command_output = output or "OK"
+    return ok, f"Command: {command_rendered}\nResponse: {command_output}"
 
 
 def render_pending_service_operation_messages() -> None:
@@ -1100,11 +1102,18 @@ def request_master_switchover() -> None:
     st.rerun()
 
 
-def switchover_master_role(cluster: ClusterConfig) -> list[tuple[str, str]]:
+def switchover_master_role(cluster: ClusterConfig) -> dict[str, Any]:
     target_db = get_target_database(cluster, "rw")
     rows = fetch_all_node_metrics(cluster.nodes, target_db)
+    result: dict[str, Any] = {
+        "messages": [],
+        "success": False,
+        "roles": {},
+        "diagnostics": [],
+    }
     if not rows:
-        return [("error", "Не удалось получить состояние узлов перед переключением master.")]
+        result["messages"] = [("error", "Не удалось получить состояние узлов перед переключением master.")]
+        return result
 
     role_aliases = {
         "master": {"master", "primary", "leader"},
@@ -1124,15 +1133,17 @@ def switchover_master_role(cluster: ClusterConfig) -> list[tuple[str, str]]:
     ]
 
     if len(masters) != 1:
-        return [
+        result["messages"] = [
             (
                 "error",
                 "Для безопасного переключения требуется ровно один активный master. "
                 f"Сейчас обнаружено: {len(masters)}.",
             )
         ]
+        return result
     if not slaves:
-        return [("error", "Не найден активный slave, на который можно безопасно перевести роль master.")]
+        result["messages"] = [("error", "Не найден активный slave, на который можно безопасно перевести роль master.")]
+        return result
 
     old_master_row = masters[0]
     new_master_row = slaves[0]
@@ -1140,14 +1151,18 @@ def switchover_master_role(cluster: ClusterConfig) -> list[tuple[str, str]]:
     new_master = nodes_by_name.get(str(new_master_row["node"]))
 
     if old_master is None or new_master is None:
-        return [("error", "Не удалось сопоставить роли узлов с конфигурацией кластера.")]
+        result["messages"] = [("error", "Не удалось сопоставить роли узлов с конфигурацией кластера.")]
+        return result
 
     if not old_master.control_via_ssh or not old_master.ssh_host:
-        return [("error", f"Для узла master '{old_master.name}' не настроено SSH-управление.")]
+        result["messages"] = [("error", f"Для узла master '{old_master.name}' не настроено SSH-управление.")]
+        return result
     if not new_master.control_via_ssh or not new_master.ssh_host:
-        return [("error", f"Для узла slave '{new_master.name}' не настроено SSH-управление.")]
+        result["messages"] = [("error", f"Для узла slave '{new_master.name}' не настроено SSH-управление.")]
+        return result
 
     messages: list[tuple[str, str]] = []
+    diagnostics: list[dict[str, str]] = []
     if len(slaves) > 1:
         messages.append(
             (
@@ -1158,6 +1173,14 @@ def switchover_master_role(cluster: ClusterConfig) -> list[tuple[str, str]]:
         )
 
     ok, output = run_node_action(old_master, "stop")
+    diagnostics.append(
+        {
+            "step": "Остановка текущего master",
+            "node": old_master.name,
+            "action": "stop",
+            "output": output,
+        }
+    )
     if not ok:
         messages.append(
             (
@@ -1165,7 +1188,9 @@ def switchover_master_role(cluster: ClusterConfig) -> list[tuple[str, str]]:
                 f"Не удалось остановить текущий master '{old_master.name}': {output or 'unknown error'}.",
             )
         )
-        return messages
+        result["messages"] = messages
+        result["diagnostics"] = diagnostics
+        return result
 
     promoted = False
     for _ in range(20):
@@ -1186,6 +1211,14 @@ def switchover_master_role(cluster: ClusterConfig) -> list[tuple[str, str]]:
             )
         )
         rollback_ok, rollback_output = run_node_action(old_master, "start")
+        diagnostics.append(
+            {
+                "step": "Rollback: запуск прежнего master",
+                "node": old_master.name,
+                "action": "start",
+                "output": rollback_output,
+            }
+        )
         if rollback_ok:
             messages.append(("warning", f"Сервис на '{old_master.name}' запущен обратно после неуспешного переключения."))
         else:
@@ -1195,9 +1228,19 @@ def switchover_master_role(cluster: ClusterConfig) -> list[tuple[str, str]]:
                     f"Не удалось вернуть сервис на '{old_master.name}': {rollback_output or 'unknown error'}.",
                 )
             )
-        return messages
+        result["messages"] = messages
+        result["diagnostics"] = diagnostics
+        return result
 
     start_ok, start_output = run_node_action(old_master, "start")
+    diagnostics.append(
+        {
+            "step": "Запуск бывшего master после промоушена standby",
+            "node": old_master.name,
+            "action": "start",
+            "output": start_output,
+        }
+    )
     if not start_ok:
         messages.append(
             (
@@ -1206,7 +1249,9 @@ def switchover_master_role(cluster: ClusterConfig) -> list[tuple[str, str]]:
                 f"{start_output or 'unknown error'}.",
             )
         )
-        return messages
+        result["messages"] = messages
+        result["diagnostics"] = diagnostics
+        return result
 
     for _ in range(20):
         time.sleep(2)
@@ -1221,7 +1266,11 @@ def switchover_master_role(cluster: ClusterConfig) -> list[tuple[str, str]]:
                     f"'{old_master.name}' вернулся как slave.",
                 )
             )
-            return messages
+            result["messages"] = messages
+            result["success"] = True
+            result["roles"] = {"master": new_master.name, "slave": old_master.name}
+            result["diagnostics"] = diagnostics
+            return result
 
     messages.append(
         (
@@ -1230,7 +1279,9 @@ def switchover_master_role(cluster: ClusterConfig) -> list[tuple[str, str]]:
             "не подтвердил роль slave за отведённое время.",
         )
     )
-    return messages
+    result["messages"] = messages
+    result["diagnostics"] = diagnostics
+    return result
 
 
 def run_pending_service_operations(cluster: ClusterConfig) -> None:
@@ -1242,10 +1293,13 @@ def run_pending_service_operations(cluster: ClusterConfig) -> None:
         st.session_state["pending_service_operation_messages"] = messages
     elif st.session_state.pop("pending_master_switchover_action", False):
         with st.spinner("Переключаем роль master между PostgreSQL-нодами..."):
-            messages = switchover_master_role(cluster)
+            switchover_result = switchover_master_role(cluster)
+            messages = switchover_result.get("messages", [])
         if not messages:
-            messages = [("warning", "Операция переключения завершена без диагностических сообщений.")]
-        st.session_state["pending_service_operation_messages"] = messages
+            switchover_result["messages"] = [("warning", "Операция переключения завершена без диагностических сообщений.")]
+        st.session_state["master_switchover_result_payload"] = switchover_result
+        st.session_state["show_master_switchover_result_dialog"] = True
+        st.rerun()
 
 
 def open_reset_counters_dialog(cluster: ClusterConfig, wg: WorkloadGenerator) -> None:
@@ -1359,6 +1413,50 @@ def open_master_switchover_dialog(cluster: ClusterConfig) -> None:
             request_master_switchover()
         if confirm_cols[1].button("❌ Отмена", key="confirm_master_switchover_no_dialog", use_container_width=True):
             st.session_state["confirm_master_switchover_inline"] = False
+            st.rerun()
+
+    _dialog()
+
+
+def open_master_switchover_result_dialog() -> None:
+    if not st.session_state.get("show_master_switchover_result_dialog", False):
+        return
+
+    payload = st.session_state.get("master_switchover_result_payload", {})
+    is_success = bool(payload.get("success"))
+    roles = payload.get("roles", {}) or {}
+    diagnostics = payload.get("diagnostics", []) or []
+    messages = payload.get("messages", []) or []
+
+    @st.dialog("Результат переключения master")
+    def _dialog() -> None:
+        if is_success:
+            st.success("Переключение выполнено штатно.")
+            st.markdown(
+                f"- **Текущий master:** `{roles.get('master', 'unknown')}`\n"
+                f"- **Текущий slave:** `{roles.get('slave', 'unknown')}`"
+            )
+        else:
+            st.error("Переключение завершилось с ошибкой. Ниже показаны команды и ответы.")
+            for idx, item in enumerate(diagnostics, start=1):
+                step = str(item.get("step", f"Шаг {idx}"))
+                node_name = str(item.get("node", "unknown"))
+                action = str(item.get("action", "unknown"))
+                st.markdown(f"**{idx}. {step}** (`{node_name}` / `{action}`)")
+                st.code(str(item.get("output", "")), language="bash")
+            if not diagnostics:
+                st.info("Команды не выполнялись: операция остановилась на этапе предварительных проверок.")
+
+        for level, message in messages:
+            notifier = getattr(st, level, None)
+            if callable(notifier):
+                notifier(message)
+            else:
+                st.info(message)
+
+        if st.button("Закрыть", type="primary", use_container_width=True, key="close_master_switchover_result_dialog"):
+            st.session_state["show_master_switchover_result_dialog"] = False
+            st.session_state.pop("master_switchover_result_payload", None)
             st.rerun()
 
     _dialog()
@@ -1574,6 +1672,7 @@ def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, A
     open_reset_counters_dialog(cluster, wg)
     open_reset_caches_dialog(cluster)
     open_master_switchover_dialog(cluster)
+    open_master_switchover_result_dialog()
     run_pending_service_operations(cluster)
     render_pending_service_operation_messages()
 
