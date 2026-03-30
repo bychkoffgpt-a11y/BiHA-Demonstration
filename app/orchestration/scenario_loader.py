@@ -12,6 +12,13 @@ except ModuleNotFoundError:  # pragma: no cover - зависит от окруж
 
 REQUIRED_SCENARIO_FIELDS = ("id", "name", "description", "steps", "success_criteria")
 
+LEGACY_ACTION_ALIASES = {
+    "check_node_availability": "check_cluster_health",
+    "check_cluster_roles": "verify_roles",
+    "check_replication": "verify_availability",
+    "check_replication_lag": "verify_availability",
+}
+
 
 class ScenarioLoadError(ValueError):
     """Ошибка валидации или парсинга demo-сценария."""
@@ -96,14 +103,14 @@ def _parse_step(path: Path, index: int, step_data: Any) -> StepDTO:
         raise ScenarioLoadError(f"{path}: step #{index + 1} must be mapping")
 
     if "action_type" in step_data:
-        action_type = str(step_data.get("action_type", "")).strip()
+        action_type = _normalize_action_type(str(step_data.get("action_type", "")).strip())
         target_node = str(step_data.get("target_node", "cluster")).strip() or "cluster"
         params = step_data.get("params") or {}
-        wait_condition = step_data.get("wait_condition") or {"equals": "ok"}
+        wait_condition = step_data.get("wait_condition")
         timeout_raw = step_data.get("timeout", 10.0)
-        expected = step_data.get("expected", "ok")
+        expected = step_data.get("expected")
     elif "action" in step_data:
-        action_type = str(step_data.get("action", "")).strip()
+        action_type = _normalize_action_type(str(step_data.get("action", "")).strip())
         target_node = str(step_data.get("target_node", "cluster")).strip() or "cluster"
         params = dict(step_data.get("params") or {})
         if "details" in step_data and "details" not in params:
@@ -111,9 +118,9 @@ def _parse_step(path: Path, index: int, step_data: Any) -> StepDTO:
         if "name" in step_data and "step_name" not in params:
             params["step_name"] = step_data["name"]
 
-        wait_condition = step_data.get("wait_condition") or {"equals": "ok"}
+        wait_condition = step_data.get("wait_condition")
         timeout_raw = step_data.get("timeout", 10.0)
-        expected = step_data.get("expected", "ok")
+        expected = step_data.get("expected")
     else:
         raise ScenarioLoadError(
             f"{path}: step #{index + 1} must contain 'action_type' or legacy 'action'"
@@ -125,13 +132,18 @@ def _parse_step(path: Path, index: int, step_data: Any) -> StepDTO:
     if not isinstance(params, dict):
         raise ScenarioLoadError(f"{path}: step #{index + 1} field 'params' must be mapping")
 
-    if not isinstance(wait_condition, dict):
+    if wait_condition is not None and not isinstance(wait_condition, dict):
         raise ScenarioLoadError(f"{path}: step #{index + 1} field 'wait_condition' must be mapping")
 
     try:
         timeout = float(timeout_raw)
     except (TypeError, ValueError) as exc:
         raise ScenarioLoadError(f"{path}: step #{index + 1} field 'timeout' must be a number") from exc
+
+    if wait_condition in ({}, None):
+        wait_condition = _default_wait_condition_for_action(action_type)
+    if expected is None:
+        expected = _default_expected_for_action(action_type)
 
     return StepDTO(
         action_type=action_type,
@@ -141,3 +153,24 @@ def _parse_step(path: Path, index: int, step_data: Any) -> StepDTO:
         timeout=timeout,
         expected=expected,
     )
+
+
+def _normalize_action_type(action_type: str) -> str:
+    normalized = action_type.strip()
+    if not normalized:
+        return normalized
+    return LEGACY_ACTION_ALIASES.get(normalized, normalized)
+
+
+def _default_wait_condition_for_action(action_type: str) -> dict[str, Any]:
+    normalized = action_type.lower().strip()
+    if normalized in {"check_cluster_health", "verify_roles", "verify_availability"}:
+        return {}
+    return {"equals": "ok"}
+
+
+def _default_expected_for_action(action_type: str) -> Any:
+    normalized = action_type.lower().strip()
+    if normalized in {"check_cluster_health", "verify_roles", "verify_availability"}:
+        return None
+    return "ok"
