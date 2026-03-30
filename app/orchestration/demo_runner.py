@@ -116,6 +116,7 @@ class DemoRunner:
         self._runs: dict[str, ScenarioRun] = {}
         self._run_threads: dict[str, threading.Thread] = {}
         self._cancel_events: dict[str, threading.Event] = {}
+        self._run_metrics: dict[str, dict[str, Any]] = {}
         self._scenario_timeout_sec = scenario_timeout_sec
         self._fault_injection = FaultInjectionController(max_injection_duration_sec=max_injection_duration_sec)
         self._lock = threading.RLock()
@@ -154,6 +155,7 @@ class DemoRunner:
             self._runs[run_id] = run
             cancel_event = threading.Event()
             self._cancel_events[run_id] = cancel_event
+            self._run_metrics[run_id] = {}
             thread = threading.Thread(
                 target=self._run_scenario,
                 args=(run_id, scenario, cancel_event),
@@ -258,6 +260,7 @@ class DemoRunner:
             with self._lock:
                 self._run_threads.pop(run_id, None)
                 self._cancel_events.pop(run_id, None)
+                self._run_metrics.pop(run_id, None)
             LOGGER.info("Scenario execution finalized | run_id=%s", run_id)
 
     def _execute_step(self, run_id: str, step_index: int, step: Step, cancel_event: threading.Event) -> None:
@@ -309,8 +312,14 @@ class DemoRunner:
             run = self._runs[run_id]
             log = run.step_logs[step_index]
             log.action_result = action_result
+        self._record_run_metrics(run_id, step.action_type, action_result)
 
-        observation = self.wait_until(step.wait_condition, step.timeout, cancel_event)
+        observation = self.wait_until(
+            step.wait_condition,
+            step.timeout,
+            cancel_event,
+            observation_source=self._resolve_observation_source(run_id, step),
+        )
         is_valid, actual_result, reason = self.validate(step.expected, observation)
 
         with self._lock:
@@ -390,6 +399,19 @@ class DemoRunner:
 
         if action_type == "switchover":
             return self._execute_real_switchover(step)
+        if action_type in {"check_cluster_health", "verify_roles", "verify_availability"}:
+            return {
+                "action_type": action_type,
+                "target_node": step.target_node,
+                "params": step.params,
+                "rollback_id": None,
+                "orchestration": {
+                    "phase": "orchestration",
+                    "simulated": False,
+                    "details": f"Read-only orchestration verification for action={action_type}",
+                },
+                "executed_at": datetime.now(UTC).isoformat(),
+            }
 
         raise NotImplementedError(
             f"Orchestration action {action_type!r} requires explicit demo/mock mode "
@@ -399,9 +421,11 @@ class DemoRunner:
     def _execute_real_switchover(self, step: Step) -> dict[str, Any]:
         from cluster_demo import load_cluster_config, switchover_master_role
 
+        started_monotonic = time.monotonic()
         cluster_config_path = self._resolve_cluster_config_path(step.params)
         cluster = load_cluster_config(cluster_config_path)
         switchover_result = switchover_master_role(cluster)
+        switchover_duration_sec = round(time.monotonic() - started_monotonic, 3)
         roles = switchover_result.get("roles") or {}
         old_leader = roles.get("slave")
         new_leader = roles.get("master")
@@ -423,6 +447,7 @@ class DemoRunner:
                 "new_leader": new_leader,
                 "diagnostics": diagnostics,
                 "messages": messages,
+                "switchover_duration_sec": switchover_duration_sec,
             },
             "executed_at": datetime.now(UTC).isoformat(),
         }
@@ -449,12 +474,10 @@ class DemoRunner:
         observation_source: Callable[[], Observation] | None = None,
     ) -> Observation:
         """Ожидание условия до timeout с периодическим опросом."""
-        source_fn = observation_source or self._default_observation
+        source_fn = observation_source or self._observe_default
         deadline = time.monotonic() + timeout
-        expected_value = condition.get("equals")
         LOGGER.info(
-            "Waiting for condition | expected=%r timeout_sec=%s condition=%s",
-            expected_value,
+            "Waiting for condition | timeout_sec=%s condition=%s",
             timeout,
             condition,
         )
@@ -464,15 +487,14 @@ class DemoRunner:
                 LOGGER.warning("Step wait cancelled by event")
                 raise RuntimeError("Step cancelled")
             observation = source_fn()
-            if expected_value is None or observation.value == expected_value:
+            if self._matches_condition(observation.value, condition):
                 LOGGER.info("Condition met | observed_value=%r source=%s", observation.value, observation.source)
                 return observation
             time.sleep(0.5)
 
         LOGGER.error(
-            "Step wait timeout | timeout_sec=%s expected=%r condition=%s",
+            "Step wait timeout | timeout_sec=%s condition=%s",
             timeout,
-            expected_value,
             condition,
         )
         raise TimeoutError(f"Step timeout after {timeout} sec waiting for condition={condition}")
@@ -487,18 +509,148 @@ class DemoRunner:
         }
         if expected is None:
             return True, actual, None
-        if observation.value == expected:
+        if self._matches_condition(observation.value, expected):
             return True, actual, None
         return False, actual, f"expected={expected!r}, actual={observation.value!r}"
 
     @staticmethod
-    def _default_observation() -> Observation:
+    def _observe_default() -> Observation:
         return Observation(
             timestamp=datetime.now(UTC),
             source="demo-runner",
             metric_event="state",
             value="ok",
         )
+
+    def _resolve_observation_source(self, run_id: str, step: Step) -> Callable[[], Observation]:
+        action_type = step.action_type.lower().strip()
+        if action_type == "check_cluster_health":
+            return lambda: self._observe_cluster_health(step)
+        if action_type == "verify_roles":
+            return lambda: self._observe_roles(step)
+        if action_type == "verify_availability":
+            return lambda: self._observe_availability(run_id, step)
+        return self._observe_default
+
+    def _observe_cluster_health(self, step: Step) -> Observation:
+        cluster_state = self._fetch_cluster_state(step)
+        up_nodes = [row.get("node") for row in cluster_state["rows"] if str(row.get("status")).lower() == "up"]
+        value = {
+            "cluster_config_path": str(cluster_state["cluster_config_path"]),
+            "up_nodes": up_nodes,
+            "total_nodes": len(cluster_state["rows"]),
+            "all_nodes_up": len(up_nodes) == len(cluster_state["rows"]) and bool(cluster_state["rows"]),
+        }
+        return Observation(
+            timestamp=datetime.now(UTC),
+            source="cluster-state",
+            metric_event="cluster_health",
+            value=value,
+        )
+
+    def _observe_roles(self, step: Step) -> Observation:
+        cluster_state = self._fetch_cluster_state(step)
+        roles_by_node = {str(row.get("node")): str(row.get("role")) for row in cluster_state["rows"]}
+        masters = [node for node, role in roles_by_node.items() if role.lower() in {"master", "primary", "leader"}]
+        slaves = [node for node, role in roles_by_node.items() if role.lower() in {"slave", "replica", "standby"}]
+        current_roles: dict[str, Any] = {
+            "master": masters[0] if len(masters) == 1 else None,
+            "slave": slaves[0] if len(slaves) == 1 else None,
+            "masters": masters,
+            "slaves": slaves,
+            "roles_by_node": roles_by_node,
+        }
+        value = {
+            "cluster_config_path": str(cluster_state["cluster_config_path"]),
+            "current_roles": current_roles,
+        }
+        return Observation(
+            timestamp=datetime.now(UTC),
+            source="cluster-state",
+            metric_event="roles",
+            value=value,
+        )
+
+    def _observe_availability(self, run_id: str, step: Step) -> Observation:
+        cluster_state = self._fetch_cluster_state(step)
+        with self._lock:
+            run_metrics = dict(self._run_metrics.get(run_id, {}))
+        measured_downtime_sec = float(run_metrics.get("last_switchover_duration_sec", 0.0))
+        slo_window_sec = float(step.params.get("slo_window_sec", 60.0))
+        availability_ratio = 1.0 if slo_window_sec <= 0 else max(0.0, 1.0 - (measured_downtime_sec / slo_window_sec))
+        value = {
+            "cluster_config_path": str(cluster_state["cluster_config_path"]),
+            "measured_downtime_sec": round(measured_downtime_sec, 3),
+            "availability_ratio": round(availability_ratio, 6),
+            "slo_window_sec": slo_window_sec,
+            "nodes_up": [
+                row.get("node") for row in cluster_state["rows"] if str(row.get("status")).lower() == "up"
+            ],
+        }
+        return Observation(
+            timestamp=datetime.now(UTC),
+            source="cluster-state",
+            metric_event="availability",
+            value=value,
+        )
+
+    def _fetch_cluster_state(self, step: Step) -> dict[str, Any]:
+        from cluster_demo import fetch_all_node_metrics, get_target_database, load_cluster_config
+
+        cluster_config_path = self._resolve_cluster_config_path(step.params)
+        cluster = load_cluster_config(cluster_config_path)
+        target_db = get_target_database(cluster, "rw")
+        rows = fetch_all_node_metrics(cluster.nodes, target_db)
+        return {
+            "cluster_config_path": cluster_config_path,
+            "rows": rows,
+        }
+
+    def _record_run_metrics(self, run_id: str, action_type: str, action_result: dict[str, Any]) -> None:
+        normalized_action = action_type.lower().strip()
+        if normalized_action != "switchover":
+            return
+        switchover_duration = (
+            action_result.get("orchestration", {}).get("switchover_duration_sec")
+            if isinstance(action_result.get("orchestration"), dict)
+            else None
+        )
+        if switchover_duration is None:
+            return
+        with self._lock:
+            metrics = self._run_metrics.setdefault(run_id, {})
+            metrics["last_switchover_duration_sec"] = float(switchover_duration)
+
+    def _matches_condition(self, actual: Any, condition: Any) -> bool:
+        if condition in ({}, None):
+            return True
+        if isinstance(condition, dict):
+            operator_keys = {"equals", "lte", "gte", "lt", "gt", "in"}
+            if condition.keys() and set(condition.keys()).issubset(operator_keys):
+                return self._apply_scalar_condition(actual, condition)
+            if not isinstance(actual, dict):
+                return False
+            return all(
+                key in actual and self._matches_condition(actual.get(key), expected_value)
+                for key, expected_value in condition.items()
+            )
+        return actual == condition
+
+    @staticmethod
+    def _apply_scalar_condition(actual: Any, condition: dict[str, Any]) -> bool:
+        if "equals" in condition and actual != condition["equals"]:
+            return False
+        if "lte" in condition and not (actual <= condition["lte"]):
+            return False
+        if "gte" in condition and not (actual >= condition["gte"]):
+            return False
+        if "lt" in condition and not (actual < condition["lt"]):
+            return False
+        if "gt" in condition and not (actual > condition["gt"]):
+            return False
+        if "in" in condition and actual not in condition["in"]:
+            return False
+        return True
 
 
 def build_default_scenarios() -> list[Scenario]:

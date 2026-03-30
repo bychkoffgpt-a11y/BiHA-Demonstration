@@ -12,9 +12,33 @@ steps:
   - name: verify_new_roles
     action: verify_roles
     details: Проверить, что выбранная реплика стала лидером, старый лидер стал replica.
+    wait_condition:
+      current_roles:
+        master:
+          equals: pg-node-2
+        slave:
+          equals: pg-node-1
+    expected:
+      current_roles:
+        master:
+          equals: pg-node-2
+        slave:
+          equals: pg-node-1
   - name: verify_service_availability
     action: verify_availability
     details: Убедиться, что доступность не выходила за пределы целевого SLO.
+    params:
+      slo_window_sec: 60
+    wait_condition:
+      measured_downtime_sec:
+        lte: 15
+      availability_ratio:
+        gte: 0.75
+    expected:
+      measured_downtime_sec:
+        lte: 15
+      availability_ratio:
+        gte: 0.75
 success_criteria:
   - Роли сменились контролируемо и предсказуемо.
   - Недоступность сервиса не превысила SLO.
