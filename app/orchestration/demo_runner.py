@@ -23,6 +23,15 @@ ORCHESTRATION_ACTIONS = {
     "verify_availability",
 }
 
+FAULT_INJECTION_ACTIONS = {
+    "stop_db_service",
+    "kill_db_process",
+    "network_partition",
+    "pause_node",
+    "recover_action",
+    "resume",
+}
+
 
 @dataclass(frozen=True)
 class ScenarioCatalogStatus:
@@ -321,7 +330,7 @@ class DemoRunner:
     def execute_action(self, step: Step) -> dict[str, Any]:
         """Выполнение действия шага с fault-injection guardrails и rollback metadata."""
         action_type = step.action_type.lower().strip()
-        if action_type in ORCHESTRATION_ACTIONS:
+        if action_type in ORCHESTRATION_ACTIONS or action_type not in FAULT_INJECTION_ACTIONS:
             return {
                 "action_type": action_type,
                 "target_node": step.target_node,
