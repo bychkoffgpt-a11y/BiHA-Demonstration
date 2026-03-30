@@ -1,0 +1,21 @@
+id: old_leader_return_rewind
+name: Old leader return with rewind/recovery
+description: >-
+  Возврат бывшего лидера после failover с корректным rewind/recovery и присоединением как replica.
+steps:
+  - name: reintroduce_old_leader
+    action: start_old_leader
+    details: Вернуть в сеть бывший лидер после завершения failover.
+  - name: run_rewind_or_recovery
+    action: run_rewind
+    details: Запустить pg_rewind (или recovery-процедуру) для выравнивания истории WAL.
+  - name: attach_as_replica
+    action: attach_replica
+    details: Присоединить бывший лидер к новому лидеру как replica.
+  - name: verify_catchup
+    action: verify_wal_catchup
+    details: Проверить корректное догоняние WAL/журнала и стабильную репликацию.
+success_criteria:
+  - Узел не становится вторым лидером.
+  - Узел корректно догоняет WAL/лог.
+  - Репликация стабильна, роли кластера консистентны.

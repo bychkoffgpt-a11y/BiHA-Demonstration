@@ -1,0 +1,22 @@
+id: healthy_cluster
+name: Healthy cluster baseline check
+description: >-
+  Базовая проверка здоровья кластера перед нагрузкой и отказоустойчивыми сценариями.
+steps:
+  - name: check_all_nodes_reachable
+    action: check_node_availability
+    details: Проверить доступность всех узлов кластера (SQL/SSH/API health-check).
+  - name: check_replication_streams
+    action: check_replication
+    details: Проверить, что все реплики подключены к лидеру и получают WAL.
+  - name: check_replication_lag
+    action: check_replication_lag
+    details: Убедиться, что lag на всех репликах ниже целевого порога.
+  - name: check_roles
+    action: check_cluster_roles
+    details: Проверить корректное распределение ролей leader/replica.
+success_criteria:
+  - В кластере ровно 1 лидер.
+  - В кластере N-1 реплик.
+  - Replication lag у всех реплик ниже заданного порога.
+  - Отсутствуют признаки деградации сервиса.

@@ -518,3 +518,18 @@ ssh -vvv -o BatchMode=yes -o ConnectTimeout=5 -i /home/appuser/.ssh/id_ed25519 p
 
 Предыдущая версия README ошибочно описывала Kubernetes/Grafana-стек как обязательный.
 Для данного проекта это избыточно: достаточно Python-приложения, доступа к PostgreSQL и (опционально) SSH.
+
+## Каталог готовых demo-сценариев
+
+Добавлен каталог `config/demo_scenarios/` с 5 готовыми YAML-сценариями для оркестрации и демонстрации отказоустойчивости:
+
+- `healthy_cluster.yaml` — проверка базового здоровья кластера (доступность, роли, репликация, lag).
+- `planned_switchover.yaml` — контролируемый switchover на выбранную реплику.
+- `leader_crash_failover.yaml` — аварийный failover при падении лидера.
+- `split_brain_referee.yaml` — проверка quorum/referee при сетевом разделении.
+- `old_leader_return_rewind.yaml` — возврат бывшего лидера через rewind/recovery как replica.
+
+Каждый файл содержит:
+- идентификатор сценария и краткое описание;
+- список шагов выполнения;
+- формализованные критерии успешности.
