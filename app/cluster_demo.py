@@ -80,6 +80,7 @@ class WorkloadGenerator:
     def __init__(self, runtime_id: str) -> None:
         self._runtime_id = runtime_id
         self._workers: list[WorkloadGenerator._WorkerSlot] = []
+        self._workers_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._manager_thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -95,7 +96,15 @@ class WorkloadGenerator:
 
     @property
     def running(self) -> bool:
+        return self.manager_running or self.has_alive_workers()
+
+    @property
+    def manager_running(self) -> bool:
         return self._manager_thread is not None and self._manager_thread.is_alive()
+
+    def has_alive_workers(self) -> bool:
+        with self._workers_lock:
+            return any(worker.thread.is_alive() for worker in self._workers)
 
     def stats_snapshot(self) -> dict[str, int]:
         with self._lock:
@@ -129,7 +138,7 @@ class WorkloadGenerator:
             read_ratio,
             target_size_gb=target_size_gb,
         )
-        if self.running:
+        if self.manager_running:
             return
         self._stop_event.clear()
         self._write_status(is_running=True)
@@ -170,43 +179,65 @@ class WorkloadGenerator:
         self._write_status(is_running=False)
 
     def _manage_workers(self) -> None:
-        while not self._stop_event.is_set():
-            self._sync_workers()
-            now = time.monotonic()
-            if now - self._last_status_flush_monotonic >= 1.0:
-                self._write_status(is_running=True)
-                self._last_status_flush_monotonic = now
-            self._stop_event.wait(0.2)
-        self._stop_all_workers()
+        try:
+            while not self._stop_event.is_set():
+                self._sync_workers()
+                now = time.monotonic()
+                if now - self._last_status_flush_monotonic >= 1.0:
+                    try:
+                        self._write_status(is_running=True)
+                    except Exception:
+                        LOGGER.exception("Failed to flush runtime workload status from manager thread")
+                    self._last_status_flush_monotonic = now
+                self._stop_event.wait(0.2)
+        except Exception:
+            LOGGER.exception("Workload manager thread crashed")
+        finally:
+            self._stop_all_workers()
+            try:
+                self._write_status(is_running=False)
+            except Exception:
+                LOGGER.exception("Failed to flush stopped runtime workload status after manager shutdown")
 
     def _stop_all_workers(self) -> None:
-        workers = list(self._workers)
-        self._workers = []
+        with self._workers_lock:
+            workers = list(self._workers)
+            self._workers = []
         for worker in workers:
             worker.stop_event.set()
         for worker in workers:
             worker.thread.join(timeout=2)
 
     def _sync_workers(self) -> None:
+        with self._workers_lock:
+            workers_snapshot = list(self._workers)
         alive_workers: list[WorkloadGenerator._WorkerSlot] = []
-        for worker in self._workers:
+        for worker in workers_snapshot:
             if worker.thread.is_alive():
                 alive_workers.append(worker)
-        self._workers = alive_workers
+        with self._workers_lock:
+            self._workers = alive_workers
 
         with self._settings_lock:
             desired_workers = self._desired_workers
 
-        while len(self._workers) > desired_workers:
-            worker = self._workers.pop()
+        while True:
+            with self._workers_lock:
+                if len(self._workers) <= desired_workers:
+                    break
+                worker = self._workers.pop()
             worker.stop_event.set()
             worker.thread.join(timeout=2)
 
-        while len(self._workers) < desired_workers and not self._stop_event.is_set():
+        while not self._stop_event.is_set():
+            with self._workers_lock:
+                if len(self._workers) >= desired_workers:
+                    break
             worker_stop_event = threading.Event()
             thread = threading.Thread(target=self._run_worker, args=(worker_stop_event,), daemon=True)
             slot = WorkloadGenerator._WorkerSlot(thread=thread, stop_event=worker_stop_event)
-            self._workers.append(slot)
+            with self._workers_lock:
+                self._workers.append(slot)
             thread.start()
 
     def _run_worker(self, worker_stop_event: threading.Event) -> None:
