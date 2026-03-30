@@ -1313,12 +1313,12 @@ def open_reset_counters_dialog(cluster: ClusterConfig, wg: WorkloadGenerator) ->
                 "Будут предприняты попытки очистки счётчиков pg_stat_database и связанных shared статистик."
             )
             confirm_cols = st.columns(2)
-            if confirm_cols[0].button("✅ Да, сбросить", key="confirm_reset_yes", use_container_width=True):
+            if confirm_cols[0].button("✅ Да, сбросить", key="confirm_reset_yes", width="stretch"):
                 wg.reset_stats()
                 st.session_state["pending_service_operation_messages"] = reset_server_stats(cluster)
                 st.session_state["confirm_reset_counters_inline"] = False
                 st.rerun()
-            if confirm_cols[1].button("❌ Отмена", key="confirm_reset_no", use_container_width=True):
+            if confirm_cols[1].button("❌ Отмена", key="confirm_reset_no", width="stretch"):
                 st.session_state["confirm_reset_counters_inline"] = False
                 st.rerun()
         return
@@ -1330,12 +1330,12 @@ def open_reset_counters_dialog(cluster: ClusterConfig, wg: WorkloadGenerator) ->
             "включая статистику pg_stat_database и shared statistics."
         )
         confirm_cols = st.columns(2)
-        if confirm_cols[0].button("✅ Да, сбросить", key="confirm_reset_yes_dialog", use_container_width=True):
+        if confirm_cols[0].button("✅ Да, сбросить", key="confirm_reset_yes_dialog", width="stretch"):
             wg.reset_stats()
             st.session_state["pending_service_operation_messages"] = reset_server_stats(cluster)
             st.session_state["confirm_reset_counters_inline"] = False
             st.rerun()
-        if confirm_cols[1].button("❌ Отмена", key="confirm_reset_no_dialog", use_container_width=True):
+        if confirm_cols[1].button("❌ Отмена", key="confirm_reset_no_dialog", width="stretch"):
             st.session_state["confirm_reset_counters_inline"] = False
             st.rerun()
 
@@ -1353,9 +1353,9 @@ def open_reset_caches_dialog(cluster: ClusterConfig) -> None:
                 "Операция требует sudo без пароля и может временно ухудшить производительность."
             )
             confirm_cols = st.columns(2)
-            if confirm_cols[0].button("✅ Да, очистить кэши", key="confirm_reset_caches_yes", use_container_width=True):
+            if confirm_cols[0].button("✅ Да, очистить кэши", key="confirm_reset_caches_yes", width="stretch"):
                 request_reset_caches()
-            if confirm_cols[1].button("❌ Отмена", key="confirm_reset_caches_no", use_container_width=True):
+            if confirm_cols[1].button("❌ Отмена", key="confirm_reset_caches_no", width="stretch"):
                 st.session_state["confirm_reset_caches_inline"] = False
                 st.rerun()
         return
@@ -1367,9 +1367,9 @@ def open_reset_caches_dialog(cluster: ClusterConfig) -> None:
             "Операция требует sudo без пароля и может временно ухудшить производительность."
         )
         confirm_cols = st.columns(2)
-        if confirm_cols[0].button("✅ Да, очистить кэши", key="confirm_reset_caches_yes_dialog", use_container_width=True):
+        if confirm_cols[0].button("✅ Да, очистить кэши", key="confirm_reset_caches_yes_dialog", width="stretch"):
             request_reset_caches()
-        if confirm_cols[1].button("❌ Отмена", key="confirm_reset_caches_no_dialog", use_container_width=True):
+        if confirm_cols[1].button("❌ Отмена", key="confirm_reset_caches_no_dialog", width="stretch"):
             st.session_state["confirm_reset_caches_inline"] = False
             st.rerun()
 
@@ -1390,10 +1390,10 @@ def open_master_switchover_dialog(cluster: ClusterConfig) -> None:
             if confirm_cols[0].button(
                 "✅ Да, переключить master",
                 key="confirm_master_switchover_yes",
-                use_container_width=True,
+                width="stretch",
             ):
                 request_master_switchover()
-            if confirm_cols[1].button("❌ Отмена", key="confirm_master_switchover_no", use_container_width=True):
+            if confirm_cols[1].button("❌ Отмена", key="confirm_master_switchover_no", width="stretch"):
                 st.session_state["confirm_master_switchover_inline"] = False
                 st.rerun()
         return
@@ -1408,10 +1408,10 @@ def open_master_switchover_dialog(cluster: ClusterConfig) -> None:
         if confirm_cols[0].button(
             "✅ Да, переключить master",
             key="confirm_master_switchover_yes_dialog",
-            use_container_width=True,
+            width="stretch",
         ):
             request_master_switchover()
-        if confirm_cols[1].button("❌ Отмена", key="confirm_master_switchover_no_dialog", use_container_width=True):
+        if confirm_cols[1].button("❌ Отмена", key="confirm_master_switchover_no_dialog", width="stretch"):
             st.session_state["confirm_master_switchover_inline"] = False
             st.rerun()
 
@@ -1454,7 +1454,7 @@ def open_master_switchover_result_dialog() -> None:
             else:
                 st.info(message)
 
-        if st.button("Закрыть", type="primary", use_container_width=True, key="close_master_switchover_result_dialog"):
+        if st.button("Закрыть", type="primary", width="stretch", key="close_master_switchover_result_dialog"):
             st.session_state["show_master_switchover_result_dialog"] = False
             st.session_state.pop("master_switchover_result_payload", None)
             st.rerun()
@@ -1528,7 +1528,7 @@ def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, A
     st.sidebar.header("Управление нагрузкой")
     toggle_label = "⏹ Остановить нагрузку" if desired_is_running else "▶️ Запустить нагрузку"
     toggle_type = "primary" if desired_is_running else "secondary"
-    if st.sidebar.button(toggle_label, key="sidebar_toggle_load", use_container_width=True, type=toggle_type):
+    if st.sidebar.button(toggle_label, key="sidebar_toggle_load", width="stretch", type=toggle_type):
         start_profile = {
             "mode": st.session_state.get("load_mode", "rw"),
             "clients": int(st.session_state.get("load_clients", 1)),
@@ -1659,13 +1659,13 @@ def render_sidebar(cluster: ClusterConfig, wg: WorkloadGenerator) -> dict[str, A
 
     st.sidebar.divider()
     st.sidebar.markdown("#### Сервисные операции")
-    if st.sidebar.button("🔄 Сбросить счётчики", use_container_width=True, key="sidebar_reset_counters"):
+    if st.sidebar.button("🔄 Сбросить счётчики", width="stretch", key="sidebar_reset_counters"):
         st.session_state["confirm_reset_counters_inline"] = True
         st.rerun()
-    if st.sidebar.button("🧹 Сбросить кэши", use_container_width=True, key="sidebar_reset_caches"):
+    if st.sidebar.button("🧹 Сбросить кэши", width="stretch", key="sidebar_reset_caches"):
         st.session_state["confirm_reset_caches_inline"] = True
         st.rerun()
-    if st.sidebar.button("🔁 Переключить master", use_container_width=True, key="sidebar_master_switchover"):
+    if st.sidebar.button("🔁 Переключить master", width="stretch", key="sidebar_master_switchover"):
         st.session_state["confirm_master_switchover_inline"] = True
         st.rerun()
 
@@ -1824,7 +1824,7 @@ def render_controls(cluster: ClusterConfig, collector: BackgroundMetricsCollecto
             action_ru = "остановка" if is_running else "запуск"
 
             st.write(f"**{node.name}**")
-            if st.button(button_label, key=f"failure-toggle-{node.name}", use_container_width=True):
+            if st.button(button_label, key=f"failure-toggle-{node.name}", width="stretch"):
                 ok, msg = run_node_action(node, action)
                 st.toast(f"{node.name} {action_ru}: {'OK' if ok else 'ERR'} | {msg}")
                 st.rerun()
@@ -2164,7 +2164,7 @@ def main() -> None:
     st.divider()
     st.text_input("Путь к конфигурационному файлу", key="cfg_path")
 
-    if st.button("🔄 Обновить", key="scenario_refresh_now", help="Немедленно обновить данные", use_container_width=True):
+    if st.button("🔄 Обновить", key="scenario_refresh_now", help="Немедленно обновить данные", width="stretch"):
         st.rerun()
 
     if profile["auto_refresh"]:

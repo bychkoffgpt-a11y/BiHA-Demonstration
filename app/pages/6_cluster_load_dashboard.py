@@ -717,7 +717,7 @@ def line_chart(
 
 def render_chart_help(chart_key: str, chart_title: str) -> None:
     help_text = CHART_EXPLANATIONS[chart_key]
-    with st.popover(chart_title, help="Нажмите, чтобы посмотреть описание графика", use_container_width=True):
+    with st.popover(chart_title, help="Нажмите, чтобы посмотреть описание графика", width="stretch"):
         st.markdown(help_text)
 
 
