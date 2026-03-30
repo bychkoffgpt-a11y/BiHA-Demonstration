@@ -4,7 +4,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import yaml
+try:
+    import yaml
+except ModuleNotFoundError:  # pragma: no cover - зависит от окружения установки
+    yaml = None
 
 
 REQUIRED_SCENARIO_FIELDS = ("id", "name", "description", "steps", "success_criteria")
@@ -45,6 +48,11 @@ def load_scenarios_from_directory(directory: str | Path) -> list[ScenarioDTO]:
 
 
 def _load_scenario_file(path: Path) -> ScenarioDTO:
+    if yaml is None:
+        raise ScenarioLoadError(
+            "PyYAML dependency is not installed. Install with: pip install -r requirements.txt"
+        )
+
     try:
         raw_data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except Exception as exc:
