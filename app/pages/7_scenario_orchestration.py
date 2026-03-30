@@ -43,15 +43,15 @@ if "scenario_report_artifacts" not in st.session_state:
 
 col_start, col_stop, col_refresh = st.columns([1, 1, 1])
 with col_start:
-    if st.button("▶️ Запустить сценарий", type="primary", use_container_width=True):
+    if st.button("▶️ Запустить сценарий", type="primary", width="stretch"):
         st.session_state["scenario_run_id"] = runner.start_scenario(selected_scenario.id)
 with col_stop:
-    if st.button("⏹ Остановить сценарий", use_container_width=True):
+    if st.button("⏹ Остановить сценарий", width="stretch"):
         run_id = st.session_state.get("scenario_run_id")
         if run_id:
             runner.stop_scenario(run_id)
 with col_refresh:
-    st.button("🔄 Обновить", use_container_width=True)
+    st.button("🔄 Обновить", width="stretch")
 
 run_id = st.session_state.get("scenario_run_id")
 if not run_id:
@@ -95,7 +95,7 @@ for log in run.step_logs:
     )
 
 st.subheader("Лог шагов")
-st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
 if run.status == RunStatus.SUCCEEDED:
     st.success("Итоговый verdict: SCENARIO PASSED")
@@ -122,7 +122,7 @@ if is_run_finished(run.status):
             data=report_file.read(),
             file_name=report_info["bundle_name"],
             mime="application/zip",
-            use_container_width=True,
+            width="stretch",
             type="primary",
         )
     st.code(

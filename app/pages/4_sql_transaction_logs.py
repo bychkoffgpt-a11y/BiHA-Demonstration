@@ -40,7 +40,7 @@ st.caption("Отдельная страница с ошибками SQL-тран
 
 refresh_col, _ = st.columns([1, 5])
 with refresh_col:
-    if st.button("Обновить", use_container_width=True):
+    if st.button("Обновить", width="stretch"):
         load_sql_log_lines.clear()
         sort_log_lines_desc.clear()
         st.rerun()
