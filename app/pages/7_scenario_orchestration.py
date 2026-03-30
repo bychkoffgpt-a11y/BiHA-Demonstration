@@ -4,6 +4,7 @@ import pandas as pd
 import streamlit as st
 
 from orchestration.demo_runner import RunStatus, get_demo_runner
+from orchestration.reporting import build_and_save_report_bundle, is_run_finished
 from ui_styles import apply_base_page_styles
 
 
@@ -28,6 +29,10 @@ st.markdown(f"**Критерий успеха:** {selected_scenario.success_crit
 
 if "scenario_run_id" not in st.session_state:
     st.session_state["scenario_run_id"] = None
+
+if "scenario_report_artifacts" not in st.session_state:
+    st.session_state["scenario_report_artifacts"] = {}
+
 
 col_start, col_stop, col_refresh = st.columns([1, 1, 1])
 with col_start:
@@ -93,3 +98,29 @@ elif run.status == RunStatus.CANCELLED:
     st.warning("Итоговый verdict: SCENARIO CANCELLED")
 else:
     st.info("Итоговый verdict: SCENARIO IN PROGRESS")
+
+if is_run_finished(run.status):
+    report_cache = st.session_state["scenario_report_artifacts"]
+    report_info = report_cache.get(run.run_id)
+    if report_info is None:
+        report_info = build_and_save_report_bundle(run)
+        report_cache[run.run_id] = report_info
+
+    st.subheader("Отчёт по завершённому run")
+    st.caption("Отчёт автоматически сформирован в форматах HTML/PDF/JSON с артефактами метрик и логов.")
+    bundle_path = report_info["bundle_path"]
+    with open(bundle_path, "rb") as report_file:
+        st.download_button(
+            "Скачать отчёт",
+            data=report_file.read(),
+            file_name=report_info["bundle_name"],
+            mime="application/zip",
+            use_container_width=True,
+            type="primary",
+        )
+    st.code(
+        f"JSON: {report_info['json_path']}\n"
+        f"HTML: {report_info['html_path']}\n"
+        f"PDF: {report_info['pdf_path']}\n",
+        language="text",
+    )
