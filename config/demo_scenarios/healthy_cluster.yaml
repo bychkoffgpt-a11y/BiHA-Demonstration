@@ -5,15 +5,23 @@ description: >-
 steps:
   - name: check_all_nodes_reachable
     action: check_node_availability
+    params:
+      cluster_config_path: config/cluster.json
     details: Проверить доступность всех узлов кластера (SQL/SSH/API health-check).
   - name: check_replication_streams
     action: check_replication
+    params:
+      cluster_config_path: config/cluster.json
     details: Проверить, что все реплики подключены к лидеру и получают WAL.
   - name: check_replication_lag
     action: check_replication_lag
+    params:
+      cluster_config_path: config/cluster.json
     details: Убедиться, что lag на всех репликах ниже целевого порога.
   - name: check_roles
     action: check_cluster_roles
+    params:
+      cluster_config_path: config/cluster.json
     details: Проверить корректное распределение ролей leader/replica.
 success_criteria:
   - В кластере ровно 1 лидер.
