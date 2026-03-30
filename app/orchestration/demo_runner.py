@@ -549,10 +549,20 @@ class DemoRunner:
         )
 
     def _observe_roles(self, step: Step) -> Observation:
+        from cluster_demo import classify_node_role
+
         cluster_state = self._fetch_cluster_state(step)
         roles_by_node = {str(row.get("node")): str(row.get("role")) for row in cluster_state["rows"]}
-        masters = [node for node, role in roles_by_node.items() if role.lower() in {"master", "primary", "leader"}]
-        slaves = [node for node, role in roles_by_node.items() if role.lower() in {"slave", "replica", "standby"}]
+        masters = [
+            str(row.get("node"))
+            for row in cluster_state["rows"]
+            if classify_node_role(row.get("role"), row.get("tx_read_only")) == "master"
+        ]
+        slaves = [
+            str(row.get("node"))
+            for row in cluster_state["rows"]
+            if classify_node_role(row.get("role"), row.get("tx_read_only")) == "slave"
+        ]
         current_roles: dict[str, Any] = {
             "master": masters[0] if len(masters) == 1 else None,
             "slave": slaves[0] if len(slaves) == 1 else None,
