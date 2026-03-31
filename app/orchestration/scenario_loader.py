@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ except ModuleNotFoundError:  # pragma: no cover - зависит от окруж
 
 
 REQUIRED_SCENARIO_FIELDS = ("id", "name", "description", "steps", "success_criteria")
+PARAM_TEMPLATE_RE = re.compile(r"^\{\{\s*params\.([a-zA-Z_][\w\.]*)\s*\}\}$")
 
 LEGACY_ACTION_ALIASES = {
     "check_node_availability": "check_cluster_health",
@@ -71,7 +73,11 @@ def _load_scenario_file(path: Path) -> ScenarioDTO:
 
     _validate_required_fields(path, raw_data)
 
-    steps_raw = raw_data["steps"]
+    scenario_params = raw_data.get("params") or {}
+    if scenario_params and not isinstance(scenario_params, dict):
+        raise ScenarioLoadError(f"{path}: 'params' must be a mapping when specified")
+
+    steps_raw = _render_scenario_templates(raw_data["steps"], {"params": scenario_params})
     if not isinstance(steps_raw, list) or not steps_raw:
         raise ScenarioLoadError(f"{path}: 'steps' must be a non-empty list")
 
@@ -181,3 +187,24 @@ def _normalize_expected(expected: Any, action_type: str) -> Any:
     if isinstance(expected, dict):
         return expected
     return {"equals": expected}
+
+
+def _render_scenario_templates(value: Any, context: dict[str, Any]) -> Any:
+    if isinstance(value, dict):
+        return {key: _render_scenario_templates(item, context) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_render_scenario_templates(item, context) for item in value]
+    if not isinstance(value, str):
+        return value
+
+    match = PARAM_TEMPLATE_RE.match(value)
+    if not match:
+        return value
+
+    lookup_path = match.group(1).split(".")
+    current: Any = context.get("params", {})
+    for part in lookup_path:
+        if not isinstance(current, dict) or part not in current:
+            return value
+        current = current[part]
+    return current
