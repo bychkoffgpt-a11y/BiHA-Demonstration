@@ -24,16 +24,22 @@ steps:
       cluster_config_path: config/cluster.json
     wait_condition:
       current_roles:
-        master:
-          in:
-            - pg-node-1
-            - pg-node-2
+        masters:
+          count_equals: 1
+        cardinality_ok:
+          equals: true
     expected:
       current_roles:
-        master:
-          in:
-            - pg-node-1
-            - pg-node-2
+        masters:
+          count_equals: 1
+        slaves:
+          count_gte: 1
+        has_single_master:
+          equals: true
+        all_other_nodes_are_slaves:
+          equals: true
+        cardinality_ok:
+          equals: true
     details: Проверить корректное распределение ролей leader/replica.
 success_criteria:
   - В кластере ровно 1 лидер.
