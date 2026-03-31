@@ -525,7 +525,9 @@ ssh -vvv -o BatchMode=yes -o ConnectTimeout=5 -i /home/appuser/.ssh/id_ed25519 p
 
 - `healthy_cluster.yaml` — проверка базового здоровья кластера (доступность, роли, репликация, lag).
 - `planned_switchover.yaml` — контролируемый switchover на выбранную реплику.
-  - Параметр `params.target_master` обязателен для детерминированного переключения: orchestration выбирает именно указанный standby, а не «первый попавшийся» slave.
+  - Параметр `target_master` задаётся в UI при запуске сценария (из списка актуальных standby на момент старта).
+  - В YAML используется безопасный placeholder `__REQUIRED_TARGET_MASTER__`: запуск без выбора standby блокируется с понятной ошибкой.
+  - Перед реальным switchover выполняется ранняя валидация: если `target_master` не входит в `available_slaves`, run завершается с подсказкой выбрать один из доступных standby.
   - Шаг `verify_service_availability` использует `measured_downtime_sec` как фактическое окно недоступности сервиса (от остановки старого лидера до подтверждения нового лидера), а не полную длительность служебной оркестрации.
   - Зафиксированные SLO: `slo_window_sec=120`, `measured_downtime_sec <= 15`, `availability_ratio >= 0.75`.
 - `leader_crash_failover.yaml` — аварийный failover при падении лидера.

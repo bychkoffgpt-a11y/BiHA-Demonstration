@@ -6,7 +6,7 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 
-from orchestration.demo_runner import DemoRunner, Observation, RunStatus, ScenarioRun, Step, StepRunLog
+from orchestration.demo_runner import DemoRunner, Observation, RunStatus, Scenario, ScenarioRun, Step, StepRunLog
 
 
 class PlannedSwitchoverRunnerTests(unittest.TestCase):
@@ -70,6 +70,73 @@ class PlannedSwitchoverRunnerTests(unittest.TestCase):
 
         self.assertEqual(observation.value["measured_downtime_sec"], 10.0)
         self.assertAlmostEqual(observation.value["availability_ratio"], 0.916667, places=6)
+
+    def test_apply_params_override_replaces_required_placeholder(self) -> None:
+        runner = DemoRunner([])
+        scenario = runner._apply_params_override(
+            scenario=Scenario(
+                id="planned_switchover",
+                name="Planned switchover",
+                description="desc",
+                success_criteria="ok",
+                steps=[
+                    Step(
+                        action_type="switchover",
+                        target_node="cluster",
+                        params={"target_master": "__REQUIRED_TARGET_MASTER__"},
+                        wait_condition={"current_roles": {"master": {"equals": "__REQUIRED_TARGET_MASTER__"}}},
+                        expected={"current_roles": {"master": {"equals": "__REQUIRED_TARGET_MASTER__"}}},
+                    )
+                ],
+            ),
+            params_override={"target_master": "pg-node-2"},
+        )
+        step = scenario.steps[0]
+        self.assertEqual(step.params["target_master"], "pg-node-2")
+        self.assertEqual(step.wait_condition["current_roles"]["master"]["equals"], "pg-node-2")
+        self.assertEqual(step.expected["current_roles"]["master"]["equals"], "pg-node-2")
+
+    def test_execute_real_switchover_fails_when_target_not_in_available_slaves(self) -> None:
+        class FakeCluster:
+            nodes = [object(), object()]
+
+        def fake_load_cluster_config(_path):
+            return FakeCluster()
+
+        def fake_get_target_database(_cluster, _mode):
+            return "postgres"
+
+        def fake_fetch_all_node_metrics(_nodes, _db):
+            return [
+                {"node": "pg-node-1", "role": "master", "tx_read_only": "off"},
+                {"node": "pg-node-2", "role": "slave", "tx_read_only": "on"},
+            ]
+
+        def fake_classify_node_role(role, _tx_read_only):
+            return str(role)
+
+        def fake_switchover_master_role(_cluster, target_master=None):  # pragma: no cover
+            return {"success": True, "roles": {"master": target_master, "slave": "pg-node-1"}}
+
+        fake_module = types.SimpleNamespace(
+            load_cluster_config=fake_load_cluster_config,
+            get_target_database=fake_get_target_database,
+            fetch_all_node_metrics=fake_fetch_all_node_metrics,
+            classify_node_role=fake_classify_node_role,
+            switchover_master_role=fake_switchover_master_role,
+        )
+        runner = DemoRunner([])
+        step = Step(
+            action_type="switchover",
+            target_node="cluster",
+            params={"cluster_config_path": "config/cluster.json", "target_master": "pg-node-3"},
+        )
+
+        with patch.dict("sys.modules", {"cluster_demo": fake_module}):
+            with self.assertRaises(RuntimeError) as raised:
+                runner._execute_real_switchover(step)
+
+        self.assertIn("available_slaves", str(raised.exception))
 
     def test_verify_availability_step_is_single_shot(self) -> None:
         runner = DemoRunner([])

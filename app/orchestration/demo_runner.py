@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import threading
 import time
 import uuid
@@ -130,17 +131,22 @@ class DemoRunner:
         with self._lock:
             return list(self._scenarios.values())
 
-    def start_scenario(self, scenario_id: str) -> str:
+    def start_scenario(
+        self,
+        scenario_id: str,
+        params_override: dict[str, Any] | None = None,
+    ) -> str:
         with self._lock:
             scenario = self._scenarios.get(scenario_id)
             if scenario is None:
                 raise ValueError(f"Unknown scenario_id: {scenario_id}")
+            effective_scenario = self._apply_params_override(scenario, params_override or {})
 
             run_id = str(uuid.uuid4())
             run = ScenarioRun(
                 run_id=run_id,
-                scenario_id=scenario.id,
-                scenario_name=scenario.name,
+                scenario_id=effective_scenario.id,
+                scenario_name=effective_scenario.name,
                 status=RunStatus.PENDING,
                 created_at=datetime.now(UTC),
                 step_logs=[
@@ -151,7 +157,7 @@ class DemoRunner:
                         timeout=step.timeout,
                         expected_result=step.expected,
                     )
-                    for index, step in enumerate(scenario.steps)
+                    for index, step in enumerate(effective_scenario.steps)
                 ],
             )
             self._runs[run_id] = run
@@ -160,7 +166,7 @@ class DemoRunner:
             self._run_metrics[run_id] = {}
             thread = threading.Thread(
                 target=self._run_scenario,
-                args=(run_id, scenario, cancel_event),
+                args=(run_id, effective_scenario, cancel_event),
                 name=f"scenario-run-{run_id[:8]}",
                 daemon=True,
             )
@@ -169,11 +175,55 @@ class DemoRunner:
             LOGGER.info(
                 "Scenario run started | run_id=%s scenario_id=%s scenario_name=%s steps=%s",
                 run_id,
-                scenario.id,
-                scenario.name,
-                len(scenario.steps),
+                effective_scenario.id,
+                effective_scenario.name,
+                len(effective_scenario.steps),
             )
             return run_id
+
+    @staticmethod
+    def _apply_params_override(scenario: Scenario, params_override: dict[str, Any]) -> Scenario:
+        if not params_override:
+            return scenario
+
+        placeholder_map = {f"__REQUIRED_{key.upper()}__": value for key, value in params_override.items()}
+
+        def _resolve(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {k: _resolve(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [_resolve(item) for item in value]
+            if isinstance(value, tuple):
+                return tuple(_resolve(item) for item in value)
+            if isinstance(value, str):
+                if value in placeholder_map:
+                    return placeholder_map[value]
+                if value.startswith("{{") and value.endswith("}}"):
+                    token = value[2:-2].strip()
+                    if token.startswith("params."):
+                        key = token.removeprefix("params.")
+                        if key in params_override:
+                            return params_override[key]
+            return copy.deepcopy(value)
+
+        overridden_steps = [
+            Step(
+                action_type=step.action_type,
+                target_node=step.target_node,
+                params=_resolve(step.params),
+                wait_condition=_resolve(step.wait_condition),
+                timeout=step.timeout,
+                expected=_resolve(step.expected),
+            )
+            for step in scenario.steps
+        ]
+        return Scenario(
+            id=scenario.id,
+            name=scenario.name,
+            description=scenario.description,
+            steps=overridden_steps,
+            success_criteria=scenario.success_criteria,
+        )
 
     def stop_scenario(self, run_id: str) -> None:
         with self._lock:
@@ -467,12 +517,36 @@ class DemoRunner:
         )
 
     def _execute_real_switchover(self, step: Step) -> dict[str, Any]:
-        from cluster_demo import load_cluster_config, switchover_master_role
+        from cluster_demo import (
+            classify_node_role,
+            fetch_all_node_metrics,
+            get_target_database,
+            load_cluster_config,
+            switchover_master_role,
+        )
 
         started_monotonic = time.monotonic()
         cluster_config_path = self._resolve_cluster_config_path(step.params)
         cluster = load_cluster_config(cluster_config_path)
         requested_target_master = str(step.params.get("target_master") or "").strip() or None
+        if not requested_target_master:
+            raise RuntimeError(
+                "Switchover failed: target_master is required. "
+                "Выберите standby-узел в UI перед запуском сценария."
+            )
+        target_db = get_target_database(cluster, "rw")
+        metrics_rows = fetch_all_node_metrics(cluster.nodes, target_db)
+        available_slaves = sorted(
+            str(row.get("node"))
+            for row in metrics_rows
+            if classify_node_role(row.get("role"), row.get("tx_read_only")) == "slave"
+        )
+        if requested_target_master not in available_slaves:
+            raise RuntimeError(
+                "Switchover failed: target_master is not in available slaves. "
+                f"target_master='{requested_target_master}', available_slaves={available_slaves}. "
+                "Выберите один из available_slaves и перезапустите сценарий."
+            )
         switchover_result = switchover_master_role(cluster, target_master=requested_target_master)
         orchestration_duration_sec = round(time.monotonic() - started_monotonic, 3)
         reported_duration = switchover_result.get("orchestration_duration_sec")
