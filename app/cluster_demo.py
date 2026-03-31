@@ -540,8 +540,9 @@ class BackgroundMetricsCollector:
 
     def stop(self) -> None:
         self._stop_event.set()
-        if self._thread:
-            self._thread.join(timeout=2)
+        thread = self._thread
+        if thread:
+            thread.join(timeout=2)
         self._thread = None
 
     def set_mode(self, mode: str) -> None:
@@ -597,6 +598,16 @@ class BackgroundMetricsCollector:
                     if len(self._history) > DEFAULT_HISTORY:
                         del self._history[:-DEFAULT_HISTORY]
             except Exception as exc:
+                if isinstance(exc, RuntimeError) and (
+                    str(exc) == "cannot schedule new futures after interpreter shutdown"
+                ):
+                    LOGGER.info(
+                        "Фоновый сбор метрик остановлен во время shutdown интерпретатора: %s",
+                        exc,
+                    )
+                    with self._lock:
+                        self._last_error = None
+                    break
                 LOGGER.exception("Ошибка фонового сбора метрик")
                 with self._lock:
                     self._last_error = str(exc)
