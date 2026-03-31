@@ -169,6 +169,38 @@ def _extract_hint(error_reason: object, actual_result: object) -> str | None:
     return None
 
 
+def _extract_executed_commands(action_result: object) -> str:
+    if not isinstance(action_result, dict):
+        return ""
+
+    commands: list[str] = []
+
+    fault = action_result.get("fault_injection")
+    if isinstance(fault, dict):
+        fault_commands = fault.get("executed_commands")
+        if isinstance(fault_commands, list):
+            commands.extend(str(command).strip() for command in fault_commands if str(command).strip())
+
+    orchestration = action_result.get("orchestration")
+    if isinstance(orchestration, dict):
+        diagnostics = orchestration.get("diagnostics")
+        if isinstance(diagnostics, list):
+            for entry in diagnostics:
+                if not isinstance(entry, dict):
+                    continue
+                output = entry.get("output")
+                if not isinstance(output, str):
+                    continue
+                for line in output.splitlines():
+                    if line.lower().startswith("command:"):
+                        command = line.split(":", 1)[1].strip()
+                        if command:
+                            commands.append(command)
+
+    unique_commands = list(dict.fromkeys(commands))
+    return "\n".join(unique_commands)
+
+
 run_level_hint = _extract_hint(run.error_reason, None)
 if run_level_hint:
     hints.append(run_level_hint)
@@ -184,6 +216,7 @@ for log in run.step_logs:
             "Action": log.action_type,
             "Target": log.target_node,
             "Timeout (sec)": log.timeout,
+            "Команды (SSH/Cluster)": _extract_executed_commands(log.action_result),
             "Ожидаемый результат": _to_display_value(log.expected_result),
             "Фактический результат": _to_display_value(log.actual_result),
             "Статус шага": _to_display_value(log.status),

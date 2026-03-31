@@ -66,7 +66,7 @@ class FaultInjectionController:
         self._run_precheck(target_node=target_node, params=params)
         self._validate_guardrails(action_type=normalized_action, params=params)
 
-        rollback_entry = self._apply(action_type=normalized_action, target_node=target_node, params=params)
+        rollback_entry, apply_details = self._apply(action_type=normalized_action, target_node=target_node, params=params)
         verify = self._verify(action_type=normalized_action, target_node=target_node, params=params)
         if not verify["ok"]:
             rollback_payload = rollback_entry.rollback_fn()
@@ -80,7 +80,12 @@ class FaultInjectionController:
             action_type=normalized_action,
             target_node=target_node,
             rollback_id=rollback_entry.rollback_id,
-            details={"phase": "inject", "verify": verify, "injected_at": datetime.now(UTC).isoformat()},
+            details={
+                "phase": "inject",
+                "verify": verify,
+                "injected_at": datetime.now(UTC).isoformat(),
+                **apply_details,
+            },
         )
 
     def rollback(self, target_node: str | None = None, rollback_id: str | None = None) -> dict[str, Any]:
@@ -150,11 +155,13 @@ class FaultInjectionController:
                 f"for action '{action_type}'"
             )
 
-    def _apply(self, action_type: str, target_node: str, params: dict[str, Any]) -> _RollbackEntry:
+    def _apply(self, action_type: str, target_node: str, params: dict[str, Any]) -> tuple[_RollbackEntry, dict[str, Any]]:
         rollback_id = self._next_rollback_id(target_node)
+        apply_details: dict[str, Any] = {"executed_commands": []}
 
         if action_type == "stop_db_service":
             self._service_stopped_nodes.add(target_node)
+            apply_details["executed_commands"] = [f"simulate: stop_db_service on {target_node}"]
 
             def rollback_fn() -> dict[str, Any]:
                 self._service_stopped_nodes.discard(target_node)
@@ -164,6 +171,15 @@ class FaultInjectionController:
             node, cluster_config_path = self._resolve_target_node_config(target_node=target_node, params=params)
             stop_result = self._run_node_action(node=node, action="stop")
             self._killed_process_nodes.add(target_node)
+            apply_details["executed_commands"] = [stop_result["command"]]
+            apply_details["command_outputs"] = [
+                {
+                    "command": stop_result["command"],
+                    "stdout": stop_result["stdout"],
+                    "stderr": stop_result["stderr"],
+                }
+            ]
+            apply_details["cluster_config_path"] = str(cluster_config_path)
 
             def rollback_fn() -> dict[str, Any]:
                 start_result = self._run_node_action(node=node, action="start")
@@ -185,6 +201,9 @@ class FaultInjectionController:
         elif action_type == "network_partition":
             self._partitioned_nodes.add(target_node)
             peers = params.get("peers", [])
+            apply_details["executed_commands"] = [
+                f"simulate: network_partition on {target_node} peers={peers}",
+            ]
 
             def rollback_fn() -> dict[str, Any]:
                 self._partitioned_nodes.discard(target_node)
@@ -192,6 +211,7 @@ class FaultInjectionController:
 
         elif action_type == "pause_node":
             self._paused_nodes.add(target_node)
+            apply_details["executed_commands"] = [f"simulate: pause_node on {target_node}"]
 
             def rollback_fn() -> dict[str, Any]:
                 self._paused_nodes.discard(target_node)
@@ -200,11 +220,14 @@ class FaultInjectionController:
         else:
             raise ValueError(f"Unsupported action '{action_type}'")
 
-        return _RollbackEntry(
-            rollback_id=rollback_id,
-            action_type=action_type,
-            target_node=target_node,
-            rollback_fn=rollback_fn,
+        return (
+            _RollbackEntry(
+                rollback_id=rollback_id,
+                action_type=action_type,
+                target_node=target_node,
+                rollback_fn=rollback_fn,
+            ),
+            apply_details,
         )
 
     def _verify(self, action_type: str, target_node: str, params: dict[str, Any]) -> dict[str, Any]:
