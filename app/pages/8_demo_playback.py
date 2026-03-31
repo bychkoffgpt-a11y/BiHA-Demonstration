@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
 import streamlit as st
+
+try:
+    from streamlit_autorefresh import st_autorefresh
+except ImportError:
+    st_autorefresh = None
 
 from orchestration.demo_runner import (
     RunStatus,
@@ -422,6 +428,15 @@ def _render_event_feed(run: ScenarioRun | None, failover_detected: bool, present
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+def _schedule_ui_refresh(interval_ms: int, key: str) -> None:
+    if st_autorefresh is not None:
+        st_autorefresh(interval=interval_ms, key=key)
+        return
+
+    time.sleep(interval_ms / 1000)
+    st.rerun()
+
+
 st.set_page_config(page_title="Demo Playback", layout="wide")
 apply_base_page_styles(PRESENTATION_CSS)
 st.title("Demo Playback")
@@ -501,6 +516,9 @@ if run_id:
         st.warning("Текущий run_id не найден. Запустите сценарий заново.")
 else:
     st.info("Нет активного запуска. Перейдите на страницу Scenario Orchestration и запустите сценарий.")
+
+if run and run.status in {RunStatus.PENDING, RunStatus.RUNNING}:
+    _schedule_ui_refresh(interval_ms=1000, key="demo_playback_active_run_refresh")
 
 left, right = st.columns([1.25, 1])
 with left:
