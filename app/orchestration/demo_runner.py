@@ -383,12 +383,14 @@ class DemoRunner:
                 observation = self._resolve_observation_source(run_id, step)()
             else:
                 observation = self.wait_until(
+                    run_id,
                     step.wait_condition,
                     step.timeout,
                     cancel_event,
                     observation_source=self._resolve_observation_source(run_id, step),
                 )
-            is_valid, actual_result, reason = self.validate(step.expected, observation)
+            self._record_observation_runtime_context(run_id, step, observation)
+            is_valid, actual_result, reason = self.validate(run_id, step.expected, observation)
 
             with self._lock:
                 run = self._runs[run_id]
@@ -428,6 +430,20 @@ class DemoRunner:
                 exc,
             )
             raise
+
+    def _record_observation_runtime_context(self, run_id: str, step: Step, observation: Observation) -> None:
+        step_name = str(step.params.get("step_name") or "").strip()
+        if not step_name:
+            return
+        with self._lock:
+            metrics = self._run_metrics.setdefault(run_id, {})
+            observations_by_step = metrics.setdefault("observations_by_step", {})
+            observations_by_step[step_name] = observation.value
+            capture_key = str(step.params.get("store_current_master_as") or "").strip()
+            if capture_key and isinstance(observation.value, dict):
+                current_roles = observation.value.get("current_roles")
+                if isinstance(current_roles, dict) and current_roles.get("master"):
+                    metrics[capture_key] = current_roles["master"]
 
     def _mark_cancelled(self, run_id: str, step_index: int, reason: str) -> None:
         with self._lock:
@@ -674,6 +690,7 @@ class DemoRunner:
 
     def wait_until(
         self,
+        run_id: str,
         condition: dict[str, Any],
         timeout: float,
         cancel_event: threading.Event,
@@ -695,7 +712,7 @@ class DemoRunner:
                 raise RuntimeError("Step cancelled")
             observation = source_fn()
             last_observed = observation.value
-            if self._matches_condition(observation.value, condition):
+            if self._matches_condition(observation.value, condition, run_id=run_id):
                 LOGGER.info("Condition met | observed_value=%r source=%s", observation.value, observation.source)
                 return observation
             time.sleep(0.5)
@@ -713,7 +730,7 @@ class DemoRunner:
         setattr(timeout_error, "last_observed", last_observed)
         raise timeout_error
 
-    def validate(self, expected: Any, observation: Observation) -> tuple[bool, Any, str | None]:
+    def validate(self, run_id: str, expected: Any, observation: Observation) -> tuple[bool, Any, str | None]:
         """Проверка результата шага на соответствие expected."""
         actual = {
             "timestamp": observation.timestamp.isoformat(),
@@ -723,7 +740,7 @@ class DemoRunner:
         }
         if expected is None:
             return True, actual, None
-        if self._matches_condition(observation.value, expected):
+        if self._matches_condition(observation.value, expected, run_id=run_id):
             return True, actual, None
         return False, actual, f"expected={expected!r}, actual={observation.value!r}"
 
@@ -874,24 +891,29 @@ class DemoRunner:
             if isinstance(switchover_downtime, (float, int)):
                 metrics["last_switchover_downtime_sec"] = float(switchover_downtime)
 
-    def _matches_condition(self, actual: Any, condition: Any) -> bool:
+    def _matches_condition(self, actual: Any, condition: Any, run_id: str | None = None) -> bool:
         if condition in ({}, None):
             return True
+        if isinstance(condition, str):
+            condition = self._resolve_runtime_reference(run_id, condition)
         if isinstance(condition, dict):
-            operator_keys = {"equals", "lte", "gte", "lt", "gt", "in"}
+            operator_keys = {"equals", "not_equals", "lte", "gte", "lt", "gt", "in"}
             if condition.keys() and set(condition.keys()).issubset(operator_keys):
-                return self._apply_scalar_condition(actual, condition)
+                return self._apply_scalar_condition(actual, condition, run_id=run_id)
             if not isinstance(actual, dict):
                 return False
             return all(
-                key in actual and self._matches_condition(actual.get(key), expected_value)
+                key in actual and self._matches_condition(actual.get(key), expected_value, run_id=run_id)
                 for key, expected_value in condition.items()
             )
         return actual == condition
 
-    @staticmethod
-    def _apply_scalar_condition(actual: Any, condition: dict[str, Any]) -> bool:
-        if "equals" in condition and actual != condition["equals"]:
+    def _apply_scalar_condition(self, actual: Any, condition: dict[str, Any], run_id: str | None = None) -> bool:
+        equals_value = self._resolve_runtime_condition_value(run_id, condition.get("equals"))
+        if "equals" in condition and actual != equals_value:
+            return False
+        not_equals_value = self._resolve_runtime_condition_value(run_id, condition.get("not_equals"))
+        if "not_equals" in condition and actual == not_equals_value:
             return False
         if "lte" in condition and not (actual <= condition["lte"]):
             return False
@@ -904,6 +926,44 @@ class DemoRunner:
         if "in" in condition and actual not in condition["in"]:
             return False
         return True
+
+    def _resolve_runtime_condition_value(self, run_id: str | None, value: Any) -> Any:
+        if isinstance(value, str):
+            return self._resolve_runtime_reference(run_id, value)
+        return value
+
+    def _resolve_runtime_reference(self, run_id: str | None, value: str) -> Any:
+        if run_id is None:
+            return value
+        if value.startswith("__RUN_METRIC:") and value.endswith("__"):
+            key = value[len("__RUN_METRIC:") : -2].strip()
+            if not key:
+                return value
+            with self._lock:
+                return self._run_metrics.get(run_id, {}).get(key, value)
+        if value.startswith("__STEP_METRIC:") and value.endswith("__"):
+            payload = value[len("__STEP_METRIC:") : -2]
+            try:
+                step_name, lookup_path = payload.split(":", 1)
+            except ValueError:
+                return value
+            with self._lock:
+                step_metrics = (
+                    self._run_metrics.get(run_id, {}).get("observations_by_step", {}).get(step_name.strip())
+                )
+            return self._lookup_dict_path(step_metrics, lookup_path.strip(), value)
+        return value
+
+    @staticmethod
+    def _lookup_dict_path(container: Any, path: str, fallback: Any) -> Any:
+        if not isinstance(container, dict) or not path:
+            return fallback
+        current: Any = container
+        for key in path.split("."):
+            if not isinstance(current, dict) or key not in current:
+                return fallback
+            current = current[key]
+        return current
 
 
 def build_default_scenarios() -> list[Scenario]:

@@ -2,7 +2,23 @@ id: leader_crash_failover
 name: Leader crash failover
 description: >-
   Аварийный failover при внезапном падении лидера.
+params:
+  expected_new_master: pg-node-2
 steps:
+  - name: capture_initial_master
+    action: verify_roles
+    target_node: cluster
+    params:
+      cluster_config_path: config/cluster.json
+      store_current_master_as: old_master
+    expected:
+      current_roles:
+        master:
+          in:
+            - pg-node-1
+            - pg-node-2
+            - pg-node-3
+    details: Сохранить исходного лидера в runtime context перед fault-injection.
   - name: simulate_leader_failure
     action: kill_db_process
     target_node: __CURRENT_LEADER__
@@ -20,13 +36,23 @@ steps:
     wait_condition:
       current_roles:
         master:
-          equals: pg-node-2
+          not_equals: __RUN_METRIC:old_master__
     timeout: 45
     expected:
       current_roles:
         master:
-          equals: pg-node-2
+          not_equals: __RUN_METRIC:old_master__
     details: Дождаться автоматического выбора нового лидера.
+  - name: validate_expected_new_master
+    action: verify_roles
+    target_node: cluster
+    params:
+      cluster_config_path: config/cluster.json
+    expected:
+      current_roles:
+        master:
+          equals: "{{params.expected_new_master}}"
+    details: Опционально зафиксировать конкретного нового лидера через параметр сценария.
   - name: validate_service_recovery
     action: verify_availability
     target_node: cluster

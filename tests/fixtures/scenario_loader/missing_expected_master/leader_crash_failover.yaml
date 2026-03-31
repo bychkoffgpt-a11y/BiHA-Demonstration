@@ -1,0 +1,7 @@
+id: leader_crash_failover
+name: Leader crash failover
+description: test
+steps:
+  - action: verify_roles
+    target_node: cluster
+success_criteria: ok
