@@ -46,6 +46,33 @@ _SHARED_WORKLOAD_GENERATOR: WorkloadGenerator | None = None
 _SHARED_WORKLOAD_GENERATOR_LOCK = threading.RLock()
 MASTER_ROLE_ALIASES = {"master", "primary", "leader", "rw", "writer", "readwrite", "read-write"}
 SLAVE_ROLE_ALIASES = {"slave", "replica", "standby", "ro", "reader", "readonly", "read-only"}
+CLUSTER_METRICS_SQL = """
+                    SELECT
+                        CASE WHEN pg_is_in_recovery() THEN 'slave' ELSE 'master' END,
+                        COALESCE(EXTRACT(EPOCH FROM now() - pg_last_xact_replay_timestamp())::bigint, 0),
+                        (
+                            SELECT count(*)
+                            FROM pg_locks l
+                            JOIN pg_stat_activity a ON a.pid = l.pid
+                            WHERE l.granted AND a.datname = %s
+                        ),
+                        (SELECT xact_commit FROM pg_stat_database WHERE datname = %s),
+                        (SELECT xact_rollback FROM pg_stat_database WHERE datname = %s),
+                        (SELECT blks_read FROM pg_stat_database WHERE datname = %s),
+                        (SELECT blks_hit FROM pg_stat_database WHERE datname = %s),
+                        (SELECT tup_returned FROM pg_stat_database WHERE datname = %s),
+                        (SELECT tup_fetched FROM pg_stat_database WHERE datname = %s),
+                        (SELECT count(*) FROM pg_stat_activity WHERE datname = %s AND state = 'active'),
+                        (SELECT COALESCE(blk_read_time, 0) FROM pg_stat_database WHERE datname = %s),
+                        (SELECT COALESCE(blk_write_time, 0) FROM pg_stat_database WHERE datname = %s),
+                        (
+                            SELECT count(*)
+                            FROM pg_stat_activity
+                            WHERE datname = %s AND wait_event_type = 'IO'
+                        ),
+                        current_setting('transaction_read_only'),
+                        current_setting('track_io_timing', true)
+                    """
 
 
 @dataclass
@@ -713,50 +740,31 @@ def fetch_node_metrics(node: NodeConfig, target_db: str) -> dict[str, Any]:
 
     try:
         track_io_timing: str | None = None
+        query_params = (
+            target_db,
+            target_db,
+            target_db,
+            target_db,
+            target_db,
+            target_db,
+            target_db,
+            target_db,
+            target_db,
+            target_db,
+            target_db,
+        )
+        LOGGER.info(
+            "Executing PostgreSQL metrics query | node=%s host=%s db=%s sql=%s params=%s",
+            node.name,
+            extract_host_from_dsn(node.dsn),
+            target_db,
+            " ".join(CLUSTER_METRICS_SQL.split()),
+            query_params,
+        )
         with psycopg.connect(node.dsn, connect_timeout=2, autocommit=True) as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT
-                        CASE WHEN pg_is_in_recovery() THEN 'slave' ELSE 'master' END,
-                        COALESCE(EXTRACT(EPOCH FROM now() - pg_last_xact_replay_timestamp())::bigint, 0),
-                        (
-                            SELECT count(*)
-                            FROM pg_locks l
-                            JOIN pg_stat_activity a ON a.pid = l.pid
-                            WHERE l.granted AND a.datname = %s
-                        ),
-                        (SELECT xact_commit FROM pg_stat_database WHERE datname = %s),
-                        (SELECT xact_rollback FROM pg_stat_database WHERE datname = %s),
-                        (SELECT blks_read FROM pg_stat_database WHERE datname = %s),
-                        (SELECT blks_hit FROM pg_stat_database WHERE datname = %s),
-                        (SELECT tup_returned FROM pg_stat_database WHERE datname = %s),
-                        (SELECT tup_fetched FROM pg_stat_database WHERE datname = %s),
-                        (SELECT count(*) FROM pg_stat_activity WHERE datname = %s AND state = 'active'),
-                        (SELECT COALESCE(blk_read_time, 0) FROM pg_stat_database WHERE datname = %s),
-                        (SELECT COALESCE(blk_write_time, 0) FROM pg_stat_database WHERE datname = %s),
-                        (
-                            SELECT count(*)
-                            FROM pg_stat_activity
-                            WHERE datname = %s AND wait_event_type = 'IO'
-                        ),
-                        current_setting('transaction_read_only'),
-                        current_setting('track_io_timing', true)
-                    """,
-                    (
-                        target_db,
-                        target_db,
-                        target_db,
-                        target_db,
-                        target_db,
-                        target_db,
-                        target_db,
-                        target_db,
-                        target_db,
-                        target_db,
-                        target_db,
-                    ),
-                )
+                cur.execute(CLUSTER_METRICS_SQL, query_params)
+                LOGGER.info("PostgreSQL metrics query completed | node=%s db=%s", node.name, target_db)
                 row = cur.fetchone()
                 if row:
                     track_io_timing = row[14]
@@ -933,10 +941,23 @@ def fetch_disk_metrics_via_ssh(node: NodeConfig) -> dict[str, float | int | None
 
     remote_cmd = 'bash -lc "LC_ALL=C iostat -dx 1 2"'
     cmd = build_ssh_command(node, remote_cmd)
+    command_rendered = shlex.join(cmd)
+    LOGGER.info(
+        "Executing SSH disk metrics command | node=%s host=%s command=%s",
+        node.name,
+        node.ssh_host,
+        command_rendered,
+    )
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
     except Exception as exc:
         return log_and_return_default("ssh_command_exception", error=str(exc))
+    LOGGER.info(
+        "SSH disk metrics command finished | node=%s host=%s returncode=%s",
+        node.name,
+        node.ssh_host,
+        proc.returncode,
+    )
 
     if proc.returncode != 0:
         return log_and_return_default(
@@ -1105,6 +1126,13 @@ def run_node_action(node: NodeConfig, action: str) -> tuple[bool, str]:
 
     cmd = build_ssh_command(node, remote_cmd)
     command_rendered = shlex.join(cmd)
+    LOGGER.info(
+        "Executing SSH node action | node=%s host=%s action=%s command=%s",
+        node.name,
+        node.ssh_host,
+        action,
+        command_rendered,
+    )
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
     except subprocess.TimeoutExpired:
@@ -1942,11 +1970,26 @@ def run_node_action_via_ssh(node: NodeConfig, remote_cmd: str, timeout: int = 15
         return False, "SSH control disabled for this node in config"
 
     cmd = build_ssh_command(node, remote_cmd)
+    command_rendered = shlex.join(cmd)
+    LOGGER.info(
+        "Executing SSH command | node=%s host=%s timeout_sec=%s command=%s",
+        node.name,
+        node.ssh_host,
+        timeout,
+        command_rendered,
+    )
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         LOGGER.error("SSH action timeout for node=%s cmd=%s", node.name, remote_cmd)
         return False, "SSH command timeout"
+    LOGGER.info(
+        "SSH command finished | node=%s host=%s returncode=%s command=%s",
+        node.name,
+        node.ssh_host,
+        proc.returncode,
+        command_rendered,
+    )
 
     output = (proc.stdout + "\n" + proc.stderr).strip()
     ok = proc.returncode == 0
