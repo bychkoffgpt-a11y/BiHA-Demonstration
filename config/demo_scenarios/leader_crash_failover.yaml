@@ -5,8 +5,9 @@ description: >-
 steps:
   - name: simulate_leader_failure
     action: kill_db_process
-    target_node: pg-node-1
+    target_node: __CURRENT_LEADER__
     params:
+      cluster_config_path: config/cluster.json
       environment: demo
       demo_mode: true
       duration_sec: 15
@@ -45,8 +46,10 @@ steps:
     details: Проверить восстановление доступности сервиса после failover.
   - name: recover_failed_leader
     action: recover_action
-    target_node: pg-node-1
+    target_node: __CURRENT_LEADER__
     params:
+      cluster_config_path: config/cluster.json
+      rollback_id: __ROLLBACK_ID:simulate_leader_failure__
       environment: demo
       demo_mode: true
     details: Вернуть fault-injection состояние в исходное для идемпотентного повторного запуска.

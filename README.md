@@ -531,6 +531,7 @@ ssh -vvv -o BatchMode=yes -o ConnectTimeout=5 -i /home/appuser/.ssh/id_ed25519 p
   - Шаг `verify_service_availability` использует `measured_downtime_sec` как фактическое окно недоступности сервиса (от остановки старого лидера до подтверждения нового лидера), а не полную длительность служебной оркестрации.
   - Зафиксированные SLO: `slo_window_sec=120`, `measured_downtime_sec <= 15`, `availability_ratio >= 0.75`.
 - `leader_crash_failover.yaml` — аварийный failover при падении лидера.
+  - Первый шаг `simulate_leader_failure` всегда бьёт по **актуальному** лидеру, который определяется в рантайме через `cluster_config_path` и текущие роли узлов (маркер `target_node: __CURRENT_LEADER__`).
 - `split_brain_referee.yaml` — проверка quorum/referee при сетевом разделении.
 
 Каждый файл содержит:
