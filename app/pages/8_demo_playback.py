@@ -104,17 +104,6 @@ PRESENTATION_CSS = """
     font-size: 0.8rem;
     font-weight: 600;
 }
-.presentation-mode {
-    font-size: 1.18rem !important;
-}
-.presentation-mode .meta,
-.presentation-mode .event-muted {
-    display: none;
-}
-.presentation-mode .step-row {
-    padding-top: 0.75rem;
-    padding-bottom: 0.75rem;
-}
 """
 
 
@@ -144,6 +133,32 @@ def _load_nodes_from_config(cfg_path: Path) -> list[dict[str, str]]:
     if not nodes:
         raise ValueError("В конфиге нет валидных узлов с полем name")
     return nodes
+
+
+def _extract_cluster_config_path(selected_scenario) -> str | None:
+    for step in selected_scenario.steps:
+        if step.action_type.lower().strip() == "switchover":
+            raw_path = step.params.get("cluster_config_path")
+            if raw_path:
+                return str(raw_path)
+    return None
+
+
+def _fetch_available_slaves(cluster_config_path: str) -> tuple[list[str], str | None]:
+    try:
+        from cluster_demo import classify_node_role, fetch_all_node_metrics, get_target_database, load_cluster_config
+
+        cluster = load_cluster_config(cluster_config_path)
+        target_db = get_target_database(cluster, "rw")
+        rows = fetch_all_node_metrics(cluster.nodes, target_db)
+        available_slaves = sorted(
+            str(row.get("node"))
+            for row in rows
+            if classify_node_role(row.get("role"), row.get("tx_read_only")) == "slave"
+        )
+        return available_slaves, None
+    except Exception as exc:  # noqa: BLE001
+        return [], str(exc)
 
 
 @st.cache_data(ttl=5, show_spinner=False)
@@ -280,14 +295,12 @@ def _build_topology(
 def _render_topology_map(
     run: ScenarioRun | None,
     configured_nodes: list[dict[str, str]],
-    presentation_mode: bool,
     cfg_path: Path,
 ) -> None:
     st.subheader("Topology Map")
     nodes, links, failover_detected, role_shift_detected = _build_topology(run, configured_nodes, cfg_path)
 
-    classes = "presentation-mode" if presentation_mode else ""
-    st.markdown(f'<div class="{classes}">', unsafe_allow_html=True)
+    st.markdown('<div>', unsafe_allow_html=True)
     for node in nodes:
         role_color = ROLE_COLORS[node["role"]]
         status_color = NODE_STATUS_COLORS[node["status"]]
@@ -317,15 +330,14 @@ def _render_topology_map(
     st.markdown("</div>", unsafe_allow_html=True)
 
 
-def _render_step_timeline(run: ScenarioRun | None, presentation_mode: bool, auto_scroll: bool) -> None:
+def _render_step_timeline(run: ScenarioRun | None) -> None:
     st.subheader("Step Timeline")
     if not run:
         st.info("Запустите сценарий на странице orchestration, чтобы увидеть timeline.")
         return
 
     container_id = "timeline-container"
-    classes = "presentation-mode" if presentation_mode else ""
-    st.markdown(f'<div id="{container_id}" class="{classes}" style="max-height: 390px; overflow-y: auto;">', unsafe_allow_html=True)
+    st.markdown(f'<div id="{container_id}" style="max-height: 390px; overflow-y: auto;">', unsafe_allow_html=True)
     for step in run.step_logs:
         badge, color = STATUS_STYLE.get(step.status, ("•", "#64748b"))
         st.markdown(
@@ -338,18 +350,6 @@ def _render_step_timeline(run: ScenarioRun | None, presentation_mode: bool, auto
             unsafe_allow_html=True,
         )
     st.markdown("</div>", unsafe_allow_html=True)
-
-    if auto_scroll and run.current_step_index >= 0:
-        st.components.v1.html(
-            f"""
-            <script>
-            const root = window.parent.document.getElementById('{container_id}');
-            if (root) {{ root.scrollTop = root.scrollHeight; }}
-            </script>
-            """,
-            height=0,
-        )
-
 
 def _render_slo_panel(run: ScenarioRun | None, failover_detected: bool) -> None:
     st.subheader("SLO Panel")
@@ -392,7 +392,7 @@ def _render_scenario_description_modal(selected_scenario) -> None:
 
     _scenario_details_dialog()
 
-def _render_event_feed(run: ScenarioRun | None, failover_detected: bool, presentation_mode: bool) -> None:
+def _render_event_feed(run: ScenarioRun | None, failover_detected: bool) -> None:
     st.subheader("Event Feed")
     events: list[str] = []
 
@@ -421,8 +421,7 @@ def _render_event_feed(run: ScenarioRun | None, failover_detected: bool, present
 
     events = sorted(set(events))
 
-    classes = "presentation-mode" if presentation_mode else ""
-    st.markdown(f'<div class="{classes}" style="max-height: 390px; overflow-y:auto;">', unsafe_allow_html=True)
+    st.markdown('<div style="max-height: 390px; overflow-y:auto;">', unsafe_allow_html=True)
     for item in events:
         st.markdown(f'<div class="event-item">{item}<div class="event-muted">cluster event stream</div></div>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
@@ -471,10 +470,35 @@ if scenarios:
         f"Источник сценариев: {catalog_status.loaded_from}. Загружено: {len(scenarios)}."
     )
 
+    params_override: dict[str, str] = {}
+    if selected_scenario.id == "planned_switchover":
+        cluster_config_path = _extract_cluster_config_path(selected_scenario)
+        if cluster_config_path:
+            available_slaves, slaves_error = _fetch_available_slaves(cluster_config_path)
+            if slaves_error:
+                st.error(f"Не удалось получить список standby-узлов: {slaves_error}")
+            if available_slaves:
+                selected_target_master = st.selectbox(
+                    "Целевой standby для planned_switchover",
+                    options=available_slaves,
+                    help="Выберите актуальный standby-узел на момент старта сценария.",
+                )
+                params_override["target_master"] = selected_target_master
+            else:
+                st.warning("Список standby-узлов пуст. Запуск planned_switchover недоступен.")
+        else:
+            st.error("В сценарии planned_switchover не задан params.cluster_config_path для шага switchover.")
+
     col_start, col_stop = st.columns(2)
     with col_start:
         if st.button("▶️ Запустить выбранный сценарий", type="primary", width="stretch"):
-            st.session_state["scenario_run_id"] = runner.start_scenario(selected_scenario.id)
+            if selected_scenario.id == "planned_switchover" and not params_override.get("target_master"):
+                st.error("Для planned_switchover нужно выбрать target_master из списка standby-узлов.")
+            else:
+                st.session_state["scenario_run_id"] = runner.start_scenario(
+                    selected_scenario.id,
+                    params_override=params_override or None,
+                )
     with col_stop:
         if st.button("⏹ Остановить текущий сценарий", width="stretch"):
             run_id = st.session_state.get("scenario_run_id")
@@ -502,10 +526,6 @@ except Exception as exc:
     st.error(f"Не удалось прочитать конфиг: {exc}")
     st.stop()
 
-presentation_mode = st.toggle("🎬 Режим презентации", value=False, help="Крупный шрифт + скрытие второстепенных деталей")
-auto_scroll_timeline = st.toggle("Авто-скролл таймлайна", value=True)
-st.text_input("Путь к конфигу кластера", key="demo_playback_cfg_path")
-
 run_id = st.session_state.get("scenario_run_id")
 run: ScenarioRun | None = None
 
@@ -522,13 +542,15 @@ if run and run.status in {RunStatus.PENDING, RunStatus.RUNNING}:
 
 left, right = st.columns([1.25, 1])
 with left:
-    _render_topology_map(run, configured_nodes, presentation_mode, cfg_path)
+    _render_topology_map(run, configured_nodes, cfg_path)
 with right:
     _, _, failover_detected, _ = _build_topology(run, configured_nodes, cfg_path)
     _render_slo_panel(run, failover_detected)
 
 c1, c2 = st.columns(2)
 with c1:
-    _render_step_timeline(run, presentation_mode, auto_scroll_timeline)
+    _render_step_timeline(run)
 with c2:
-    _render_event_feed(run, failover_detected, presentation_mode)
+    _render_event_feed(run, failover_detected)
+
+st.text_input("Путь к конфигу кластера", key="demo_playback_cfg_path")
