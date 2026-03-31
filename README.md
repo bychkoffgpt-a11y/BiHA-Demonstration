@@ -521,7 +521,7 @@ ssh -vvv -o BatchMode=yes -o ConnectTimeout=5 -i /home/appuser/.ssh/id_ed25519 p
 
 ## Каталог готовых demo-сценариев
 
-Добавлен каталог `config/demo_scenarios/` с 5 готовыми YAML-сценариями для оркестрации и демонстрации отказоустойчивости:
+Добавлен каталог `config/demo_scenarios/` с 4 готовыми YAML-сценариями для оркестрации и демонстрации отказоустойчивости:
 
 - `healthy_cluster.yaml` — проверка базового здоровья кластера (доступность, роли, репликация, lag).
 - `planned_switchover.yaml` — контролируемый switchover на выбранную реплику.
@@ -532,7 +532,6 @@ ssh -vvv -o BatchMode=yes -o ConnectTimeout=5 -i /home/appuser/.ssh/id_ed25519 p
   - Зафиксированные SLO: `slo_window_sec=120`, `measured_downtime_sec <= 15`, `availability_ratio >= 0.75`.
 - `leader_crash_failover.yaml` — аварийный failover при падении лидера.
 - `split_brain_referee.yaml` — проверка quorum/referee при сетевом разделении.
-- `old_leader_return_rewind.yaml` — возврат бывшего лидера через rewind/recovery как replica.
 
 Каждый файл содержит:
 - идентификатор сценария и краткое описание;
