@@ -57,6 +57,7 @@ steps:
         lte: 15
       availability_ratio:
         gte: 0.75
+    timeout: 45
     expected:
       measured_downtime_sec:
         lte: 15
