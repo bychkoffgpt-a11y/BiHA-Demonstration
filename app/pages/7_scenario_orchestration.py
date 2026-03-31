@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 import streamlit as st
 
@@ -81,6 +83,16 @@ if run.error_reason:
     st.error(f"Причина ошибки/остановки: {run.error_reason}")
 
 rows = []
+
+
+def _to_display_value(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value)
+
+
 for log in run.step_logs:
     rows.append(
         {
@@ -88,10 +100,10 @@ for log in run.step_logs:
             "Action": log.action_type,
             "Target": log.target_node,
             "Timeout (sec)": log.timeout,
-            "Ожидаемый результат": log.expected_result,
-            "Фактический результат": log.actual_result,
-            "Статус шага": log.status,
-            "Ошибка": log.error_reason,
+            "Ожидаемый результат": _to_display_value(log.expected_result),
+            "Фактический результат": _to_display_value(log.actual_result),
+            "Статус шага": _to_display_value(log.status),
+            "Ошибка": _to_display_value(log.error_reason),
         }
     )
 
