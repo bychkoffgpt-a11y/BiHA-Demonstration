@@ -140,9 +140,56 @@ def _load_nodes_from_config(cfg_path: Path) -> list[dict[str, str]]:
     return nodes
 
 
-def _build_topology(run: ScenarioRun | None, configured_nodes: list[dict[str, str]]) -> tuple[list[dict[str, str]], list[tuple[str, str]], bool, bool]:
+@st.cache_data(ttl=5, show_spinner=False)
+def _load_live_roles_from_cluster(cfg_path: str) -> tuple[dict[str, str], dict[str, str], str | None]:
+    from cluster_demo import classify_node_role, fetch_all_node_metrics, get_target_database, load_cluster_config
+
+    role_by_node: dict[str, str] = {}
+    status_by_node: dict[str, str] = {}
+    current_master: str | None = None
+    try:
+        cluster = load_cluster_config(Path(cfg_path))
+        rows = fetch_all_node_metrics(cluster.nodes, get_target_database(cluster, "rw"))
+    except Exception:
+        return role_by_node, status_by_node, current_master
+
+    for row in rows:
+        node_name = str(row.get("node") or "").strip()
+        if not node_name:
+            continue
+        status = str(row.get("status") or "").strip().lower()
+        if status in NODE_STATUS_COLORS:
+            status_by_node[node_name] = status
+        role_class = classify_node_role(row.get("role"), row.get("tx_read_only"))
+        if role_class == "master":
+            role_by_node[node_name] = "leader"
+            current_master = node_name
+        elif role_class == "slave":
+            role_by_node[node_name] = "replica"
+
+    return role_by_node, status_by_node, current_master
+
+
+def _build_topology(
+    run: ScenarioRun | None,
+    configured_nodes: list[dict[str, str]],
+    cfg_path: Path | None = None,
+) -> tuple[list[dict[str, str]], list[tuple[str, str]], bool, bool]:
+    nodes = [node.copy() for node in configured_nodes]
     failover_detected = False
     role_shift_detected = False
+    default_leader = nodes[0]["name"]
+    promoted_leader = default_leader
+
+    role_by_node: dict[str, str] = {}
+    status_by_node: dict[str, str] = {}
+    current_master: str | None = None
+    if cfg_path is not None:
+        live_roles, live_statuses, live_master = _load_live_roles_from_cluster(str(cfg_path))
+        role_by_node.update(live_roles)
+        status_by_node.update(live_statuses)
+        current_master = live_master
+
     if run:
         for step in run.step_logs:
             action = step.action_type.lower()
@@ -152,9 +199,49 @@ def _build_topology(run: ScenarioRun | None, configured_nodes: list[dict[str, st
             if "restart" in action and step.status in {"running", "failed"}:
                 failover_detected = True
 
-    nodes = [node.copy() for node in configured_nodes]
-    default_leader = nodes[0]["name"]
-    promoted_leader = nodes[1]["name"] if len(nodes) > 1 else default_leader
+            actual = step.actual_result if isinstance(step.actual_result, dict) else {}
+            value = actual.get("value") if isinstance(actual.get("value"), dict) else {}
+            current_roles = value.get("current_roles") if isinstance(value.get("current_roles"), dict) else {}
+            roles_by_node = (
+                current_roles.get("roles_by_node")
+                if isinstance(current_roles.get("roles_by_node"), dict)
+                else {}
+            )
+
+            for node_name, observed_role in roles_by_node.items():
+                normalized = str(observed_role).strip().lower()
+                if normalized in {"master", "primary", "leader"}:
+                    role_by_node[str(node_name)] = "leader"
+                elif normalized in {"slave", "replica", "standby"}:
+                    role_by_node[str(node_name)] = "replica"
+
+            if isinstance(current_roles.get("master"), str):
+                current_master = current_roles["master"]
+            if isinstance(current_roles.get("slave"), str):
+                role_by_node[current_roles["slave"]] = "replica"
+
+            for key in ("up_nodes", "nodes_up"):
+                node_list = value.get(key)
+                if isinstance(node_list, list):
+                    for node_name in node_list:
+                        status_by_node[str(node_name)] = "up"
+
+            action_result = step.action_result if isinstance(step.action_result, dict) else {}
+            orchestration = (
+                action_result.get("orchestration")
+                if isinstance(action_result.get("orchestration"), dict)
+                else {}
+            )
+            if isinstance(orchestration.get("new_leader"), str):
+                current_master = orchestration["new_leader"]
+                role_by_node[current_master] = "leader"
+            if isinstance(orchestration.get("old_leader"), str):
+                role_by_node[orchestration["old_leader"]] = "replica"
+
+    if current_master:
+        promoted_leader = current_master
+        failover_detected = failover_detected or promoted_leader != default_leader
+        role_shift_detected = promoted_leader != default_leader
 
     if run and run.status in {RunStatus.RUNNING, RunStatus.FAILED} and run.current_step_index >= 0:
         current_target = run.step_logs[run.current_step_index].target_node
@@ -162,24 +249,36 @@ def _build_topology(run: ScenarioRun | None, configured_nodes: list[dict[str, st
             if node["name"] == current_target:
                 node["status"] = "degraded" if run.status == RunStatus.RUNNING else "down"
 
-    if failover_detected:
+    for node in nodes:
+        name = node["name"]
+        if name in role_by_node:
+            node["role"] = role_by_node[name]
+        elif name == promoted_leader:
+            node["role"] = "leader"
+        elif name != default_leader:
+            node["role"] = "replica"
+
+        if name in status_by_node and node["status"] == "up":
+            node["status"] = status_by_node[name]
+
+    if failover_detected and run and run.status == RunStatus.RUNNING:
         for node in nodes:
-            if node["name"] == promoted_leader:
-                node["role"] = "leader"
-                node["status"] = "up"
-            elif node["name"] == default_leader:
-                node["role"] = "replica"
-                if run and run.status == RunStatus.RUNNING:
-                    node["status"] = "degraded"
+            if node["name"] == default_leader and node["role"] == "replica":
+                node["status"] = "degraded"
 
     source = promoted_leader if failover_detected else default_leader
     links = [(source, node["name"]) for node in nodes if node["name"] != source]
     return nodes, links, failover_detected, role_shift_detected
 
 
-def _render_topology_map(run: ScenarioRun | None, configured_nodes: list[dict[str, str]], presentation_mode: bool) -> None:
+def _render_topology_map(
+    run: ScenarioRun | None,
+    configured_nodes: list[dict[str, str]],
+    presentation_mode: bool,
+    cfg_path: Path,
+) -> None:
     st.subheader("Topology Map")
-    nodes, links, failover_detected, role_shift_detected = _build_topology(run, configured_nodes)
+    nodes, links, failover_detected, role_shift_detected = _build_topology(run, configured_nodes, cfg_path)
 
     classes = "presentation-mode" if presentation_mode else ""
     st.markdown(f'<div class="{classes}">', unsafe_allow_html=True)
@@ -405,9 +504,9 @@ else:
 
 left, right = st.columns([1.25, 1])
 with left:
-    _render_topology_map(run, configured_nodes, presentation_mode)
+    _render_topology_map(run, configured_nodes, presentation_mode, cfg_path)
 with right:
-    _, _, failover_detected, _ = _build_topology(run, configured_nodes)
+    _, _, failover_detected, _ = _build_topology(run, configured_nodes, cfg_path)
     _render_slo_panel(run, failover_detected)
 
 c1, c2 = st.columns(2)
