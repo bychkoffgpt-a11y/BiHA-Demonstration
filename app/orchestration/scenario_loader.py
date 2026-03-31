@@ -142,8 +142,7 @@ def _parse_step(path: Path, index: int, step_data: Any) -> StepDTO:
 
     if wait_condition in ({}, None):
         wait_condition = _default_wait_condition_for_action(action_type)
-    if expected is None:
-        expected = _default_expected_for_action(action_type)
+    expected = _normalize_expected(expected, action_type)
 
     return StepDTO(
         action_type=action_type,
@@ -173,4 +172,12 @@ def _default_expected_for_action(action_type: str) -> Any:
     normalized = action_type.lower().strip()
     if normalized in {"check_cluster_health", "verify_roles", "verify_availability"}:
         return None
-    return "ok"
+    return {"equals": "ok"}
+
+
+def _normalize_expected(expected: Any, action_type: str) -> Any:
+    if expected is None:
+        return _default_expected_for_action(action_type)
+    if isinstance(expected, dict):
+        return expected
+    return {"equals": expected}
