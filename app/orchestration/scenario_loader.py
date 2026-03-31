@@ -19,6 +19,11 @@ LEGACY_ACTION_ALIASES = {
     "check_cluster_roles": "verify_roles",
     "check_replication": "verify_availability",
     "check_replication_lag": "verify_availability",
+    # Legacy scenario aliases for leader_crash_failover.
+    "fault_injection": "kill_db_process",
+    "wait_failover": "verify_roles",
+    "check_service_recovery": "verify_availability",
+    "verify_write_operations": "verify_availability",
 }
 
 
