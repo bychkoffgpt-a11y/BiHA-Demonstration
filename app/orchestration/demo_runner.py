@@ -285,9 +285,15 @@ class DemoRunner:
         try:
             action_result = self.execute_action(step)
         except Exception as exc:
+            last_observed = getattr(exc, "last_observed", None)
             with self._lock:
                 run = self._runs[run_id]
                 log = run.step_logs[step_index]
+                if last_observed is not None:
+                    log.actual_result = {
+                        "source": "wait_until.timeout",
+                        "value": last_observed,
+                    }
                 log.status = "failed"
                 log.error_reason = str(exc)
                 log.finished_at = datetime.now(UTC)
@@ -341,9 +347,15 @@ class DemoRunner:
                 else:
                     raise RuntimeError(reason or "Step validation failed")
         except Exception as exc:
+            last_observed = getattr(exc, "last_observed", None)
             with self._lock:
                 run = self._runs[run_id]
                 log = run.step_logs[step_index]
+                if last_observed is not None:
+                    log.actual_result = {
+                        "source": "wait_until.timeout",
+                        "value": last_observed,
+                    }
                 log.status = "failed"
                 log.error_reason = str(exc)
                 log.finished_at = datetime.now(UTC)
@@ -487,6 +499,7 @@ class DemoRunner:
         """Ожидание условия до timeout с периодическим опросом."""
         source_fn = observation_source or self._observe_default
         deadline = time.monotonic() + timeout
+        last_observed: Any = None
         LOGGER.info(
             "Waiting for condition | timeout_sec=%s condition=%s",
             timeout,
@@ -498,17 +511,24 @@ class DemoRunner:
                 LOGGER.warning("Step wait cancelled by event")
                 raise RuntimeError("Step cancelled")
             observation = source_fn()
+            last_observed = observation.value
             if self._matches_condition(observation.value, condition):
                 LOGGER.info("Condition met | observed_value=%r source=%s", observation.value, observation.source)
                 return observation
             time.sleep(0.5)
 
         LOGGER.error(
-            "Step wait timeout | timeout_sec=%s condition=%s",
+            "Step wait timeout | timeout_sec=%s condition=%s last_observed=%r",
             timeout,
             condition,
+            last_observed,
         )
-        raise TimeoutError(f"Step timeout after {timeout} sec waiting for condition={condition}")
+        timeout_error = TimeoutError(
+            f"Step timeout after {timeout} sec waiting for condition={condition}; "
+            f"last_observed={last_observed!r}"
+        )
+        setattr(timeout_error, "last_observed", last_observed)
+        raise timeout_error
 
     def validate(self, expected: Any, observation: Observation) -> tuple[bool, Any, str | None]:
         """Проверка результата шага на соответствие expected."""
