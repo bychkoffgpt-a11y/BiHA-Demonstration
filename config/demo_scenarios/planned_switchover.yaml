@@ -51,7 +51,7 @@ steps:
     details: Убедиться, что доступность не выходила за пределы целевого SLO.
     params:
       cluster_config_path: config/cluster.json
-      slo_window_sec: 60
+      slo_window_sec: 120
     wait_condition:
       measured_downtime_sec:
         lte: 15

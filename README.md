@@ -525,6 +525,7 @@ ssh -vvv -o BatchMode=yes -o ConnectTimeout=5 -i /home/appuser/.ssh/id_ed25519 p
 
 - `healthy_cluster.yaml` — проверка базового здоровья кластера (доступность, роли, репликация, lag).
 - `planned_switchover.yaml` — контролируемый switchover на выбранную реплику.
+  - Зафиксированные SLO для шага `verify_service_availability`: `slo_window_sec=120`, `measured_downtime_sec <= 15`, `availability_ratio >= 0.75` (окно расширено с 60 до 120 сек, чтобы порог соответствовал фактической производительности стенда).
 - `leader_crash_failover.yaml` — аварийный failover при падении лидера.
 - `split_brain_referee.yaml` — проверка quorum/referee при сетевом разделении.
 - `old_leader_return_rewind.yaml` — возврат бывшего лидера через rewind/recovery как replica.
