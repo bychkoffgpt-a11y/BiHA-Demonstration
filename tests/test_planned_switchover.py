@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 from orchestration.demo_runner import DemoRunner, Observation, RunStatus, Scenario, ScenarioRun, Step, StepRunLog
+from orchestration.scenario_loader import ScenarioLoadError, load_scenarios_from_directory
 
 
 class PlannedSwitchoverRunnerTests(unittest.TestCase):
@@ -180,6 +181,48 @@ class PlannedSwitchoverRunnerTests(unittest.TestCase):
 
         runner._execute_step(run_id, 0, step, cancel_event)
         self.assertEqual(runner._runs[run_id].step_logs[0].status, "succeeded")
+
+    def test_matches_condition_supports_not_equals_run_metric_reference(self) -> None:
+        runner = DemoRunner([])
+        run_id = "run-metrics"
+        runner._run_metrics[run_id] = {"old_master": "pg-node-1"}
+
+        is_match = runner._matches_condition(
+            {"current_roles": {"master": "pg-node-2"}},
+            {"current_roles": {"master": {"not_equals": "__RUN_METRIC:old_master__"}}},
+            run_id=run_id,
+        )
+
+        self.assertTrue(is_match)
+
+    def test_record_observation_runtime_context_captures_current_master(self) -> None:
+        runner = DemoRunner([])
+        run_id = "run-context"
+        step = Step(
+            action_type="verify_roles",
+            target_node="cluster",
+            params={"step_name": "capture_initial_master", "store_current_master_as": "old_master"},
+        )
+        observation = Observation(
+            timestamp=datetime.now(timezone.utc),
+            source="cluster-state",
+            metric_event="roles",
+            value={"current_roles": {"master": "pg-node-1"}},
+        )
+
+        runner._record_observation_runtime_context(run_id, step, observation)
+
+        self.assertEqual(runner._run_metrics[run_id]["old_master"], "pg-node-1")
+        self.assertEqual(
+            runner._run_metrics[run_id]["observations_by_step"]["capture_initial_master"]["current_roles"]["master"],
+            "pg-node-1",
+        )
+
+
+class LeaderCrashFailoverScenarioValidationTests(unittest.TestCase):
+    def test_leader_crash_failover_requires_expected_new_master_param(self) -> None:
+        with self.assertRaises(ScenarioLoadError):
+            load_scenarios_from_directory("tests/fixtures/scenario_loader/missing_expected_master")
 
 
 if __name__ == "__main__":
