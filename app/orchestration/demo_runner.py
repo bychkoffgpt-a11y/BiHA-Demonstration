@@ -590,6 +590,9 @@ class DemoRunner:
                     "simulated": True,
                     "step_name": step.params.get("step_name"),
                     "details": step.params.get("details"),
+                    "executed_commands": [
+                        self._build_orchestration_probe_command(action_type=action_type, step=step)
+                    ],
                 },
                 "executed_at": datetime.now(UTC).isoformat(),
             }
@@ -597,6 +600,7 @@ class DemoRunner:
         if action_type == "switchover":
             return self._execute_real_switchover(step)
         if action_type in {"check_cluster_health", "verify_roles", "verify_availability"}:
+            pseudo_command = self._build_orchestration_probe_command(action_type=action_type, step=step)
             return {
                 "action_type": action_type,
                 "target_node": step.target_node,
@@ -606,6 +610,7 @@ class DemoRunner:
                     "phase": "orchestration",
                     "simulated": False,
                     "details": f"Read-only orchestration verification for action={action_type}",
+                    "executed_commands": [pseudo_command],
                 },
                 "executed_at": datetime.now(UTC).isoformat(),
             }
@@ -686,6 +691,15 @@ class DemoRunner:
         if not success:
             raise RuntimeError(f"Switchover failed: {messages}")
         return action_result
+
+    def _build_orchestration_probe_command(self, action_type: str, step: Step) -> str:
+        cluster_config = step.params.get("cluster_config_path")
+        command_parts = [f"cluster_probe {action_type}"]
+        if cluster_config:
+            command_parts.append(f"--cluster-config {cluster_config}")
+        if step.target_node:
+            command_parts.append(f"--target-node {step.target_node}")
+        return " ".join(command_parts)
 
     @staticmethod
     def _is_explicit_demo_mode(params: dict[str, Any]) -> bool:
