@@ -478,9 +478,12 @@ if scenarios:
             if slaves_error:
                 st.error(f"Не удалось получить список standby-узлов: {slaves_error}")
             if available_slaves:
+                if st.session_state.get("demo_playback_target_master") not in available_slaves:
+                    st.session_state["demo_playback_target_master"] = available_slaves[0]
                 selected_target_master = st.selectbox(
                     "Целевой standby для planned_switchover",
                     options=available_slaves,
+                    key="demo_playback_target_master",
                     help="Выберите актуальный standby-узел на момент старта сценария.",
                 )
                 params_override["target_master"] = selected_target_master
