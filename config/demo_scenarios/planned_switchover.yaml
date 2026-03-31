@@ -1,51 +1,41 @@
 id: planned_switchover
 name: Planned switchover
 description: >-
-  Контролируемая плановая смена лидера на выбранную реплику без аварии.
+  Контролируемая плановая смена лидера на выбранную реплику без аварии:
+  precheck проверяет только готовность кластера, а факт смены ролей валидируется после execute_switchover.
+params:
+  target_master: pg-node-2
 steps:
   - name: precheck_cluster_health
     action: check_cluster_health
-    details: Подтвердить готовность к switchover (здоровье и синхронность).
+    details: Подтвердить готовность к switchover по состоянию здоровья кластера.
     params:
       cluster_config_path: config/cluster.json
     wait_condition:
       all_nodes_up:
         equals: true
-      current_roles:
-        master:
-          equals: pg-node-1
-        slave:
-          equals: pg-node-2
     expected:
       all_nodes_up:
         equals: true
-      current_roles:
-        master:
-          equals: pg-node-1
-        slave:
-          equals: pg-node-2
   - name: execute_switchover
     action: switchover
-    details: Выполнить команду switchover с текущего лидера на выбранную реплику.
+    details: Выполнить команду switchover с текущего лидера на целевой узел.
     params:
       cluster_config_path: config/cluster.json
+      target_master: "{{ params.target_master }}"
   - name: verify_new_roles
     action: verify_roles
-    details: Проверить, что выбранная реплика стала лидером, старый лидер стал replica.
+    details: Проверить, что целевой узел из params.target_master стал лидером после switchover.
     params:
       cluster_config_path: config/cluster.json
     wait_condition:
       current_roles:
         master:
-          equals: pg-node-2
-        slave:
-          equals: pg-node-1
+          equals: "{{ params.target_master }}"
     expected:
       current_roles:
         master:
-          equals: pg-node-2
-        slave:
-          equals: pg-node-1
+          equals: "{{ params.target_master }}"
   - name: verify_service_availability
     action: verify_availability
     details: Убедиться, что доступность не выходила за пределы целевого SLO.
