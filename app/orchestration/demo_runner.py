@@ -33,6 +33,9 @@ FAULT_INJECTION_ACTIONS = {
     "resume",
 }
 
+CURRENT_LEADER_TARGET_MARKER = "__CURRENT_LEADER__"
+ROLLBACK_ID_FROM_STEP_PREFIX = "__ROLLBACK_ID:"
+
 
 @dataclass(frozen=True)
 class ScenarioCatalogStatus:
@@ -333,7 +336,8 @@ class DemoRunner:
             log.status = "running"
             log.started_at = datetime.now(UTC)
         try:
-            action_result = self.execute_action(step)
+            action_result = self.execute_action(run_id, step)
+            self._record_step_runtime_context(run_id, step, action_result)
         except Exception as exc:
             last_observed = getattr(exc, "last_observed", None)
             with self._lock:
@@ -433,17 +437,19 @@ class DemoRunner:
             run.error_reason = reason
             run.finished_at = datetime.now(UTC)
 
-    def execute_action(self, step: Step) -> dict[str, Any]:
+    def execute_action(self, run_id: str, step: Step) -> dict[str, Any]:
         """Выполнение действия шага с fault-injection guardrails и rollback metadata."""
         action_type = step.action_type.lower().strip()
+        resolved_target_node = self._resolve_action_target_node(step)
+        resolved_params = self._resolve_action_params(run_id, step, action_type)
         step_label = str(step.params.get("step_name") or step.action_type)
         LOGGER.info(
             "Starting scenario action execution | step=%s action_type=%s target=%s timeout_sec=%s params=%s",
             step_label,
             action_type,
-            step.target_node,
+            resolved_target_node,
             step.timeout,
-            step.params,
+            resolved_params,
         )
         if action_type in ORCHESTRATION_ACTIONS:
             result = self._execute_orchestration_action(step, action_type)
@@ -460,13 +466,13 @@ class DemoRunner:
 
         result = self._fault_injection.execute(
             action_type=action_type,
-            target_node=step.target_node,
-            params=step.params,
+            target_node=resolved_target_node,
+            params=resolved_params,
         )
         payload = {
             "action_type": result.action_type,
-            "target_node": step.target_node,
-            "params": step.params,
+            "target_node": resolved_target_node,
+            "params": resolved_params,
             "rollback_id": result.rollback_id,
             "fault_injection": result.details,
             "executed_at": datetime.now(UTC).isoformat(),
@@ -478,6 +484,70 @@ class DemoRunner:
             payload,
         )
         return payload
+
+    def _resolve_action_target_node(self, step: Step) -> str:
+        if step.target_node != CURRENT_LEADER_TARGET_MARKER:
+            return step.target_node
+
+        from cluster_demo import classify_node_role, fetch_all_node_metrics, get_target_database, load_cluster_config
+
+        cluster_config_path = self._resolve_cluster_config_path(step.params)
+        cluster = load_cluster_config(cluster_config_path)
+        target_db = get_target_database(cluster, "rw")
+        metrics_rows = fetch_all_node_metrics(cluster.nodes, target_db)
+        masters = sorted(
+            str(row.get("node"))
+            for row in metrics_rows
+            if classify_node_role(row.get("role"), row.get("tx_read_only")) == "master"
+        )
+        if len(masters) != 1:
+            raise RuntimeError(
+                "Runtime validation failed: expected exactly one current master to resolve "
+                f"target_node={CURRENT_LEADER_TARGET_MARKER!r}, found {len(masters)} (masters={masters})."
+            )
+        return masters[0]
+
+    def _resolve_action_params(self, run_id: str, step: Step, action_type: str) -> dict[str, Any]:
+        resolved_params = copy.deepcopy(step.params)
+        if action_type != "recover_action":
+            return resolved_params
+
+        rollback_id_value = resolved_params.get("rollback_id")
+        if not isinstance(rollback_id_value, str):
+            return resolved_params
+        if not (
+            rollback_id_value.startswith(ROLLBACK_ID_FROM_STEP_PREFIX)
+            and rollback_id_value.endswith("__")
+            and len(rollback_id_value) > len(ROLLBACK_ID_FROM_STEP_PREFIX) + 2
+        ):
+            return resolved_params
+
+        source_step = rollback_id_value[len(ROLLBACK_ID_FROM_STEP_PREFIX) : -2]
+        with self._lock:
+            run_metrics = self._run_metrics.get(run_id, {})
+            rollback_ids_by_step = run_metrics.get("rollback_ids_by_step", {})
+            resolved_rollback_id = rollback_ids_by_step.get(source_step)
+        if not resolved_rollback_id:
+            raise RuntimeError(
+                "Runtime validation failed: rollback_id marker "
+                f"{rollback_id_value!r} cannot be resolved because step {source_step!r} "
+                "has no recorded rollback_id in current run context."
+            )
+        resolved_params["rollback_id"] = resolved_rollback_id
+        return resolved_params
+
+    def _record_step_runtime_context(self, run_id: str, step: Step, action_result: dict[str, Any]) -> None:
+        step_name = str(step.params.get("step_name") or "").strip()
+        if not step_name:
+            return
+        with self._lock:
+            metrics = self._run_metrics.setdefault(run_id, {})
+            resolved_targets = metrics.setdefault("resolved_targets_by_step", {})
+            resolved_targets[step_name] = action_result.get("target_node")
+            rollback_id = action_result.get("rollback_id")
+            if rollback_id:
+                rollback_ids = metrics.setdefault("rollback_ids_by_step", {})
+                rollback_ids[step_name] = rollback_id
 
     def _execute_orchestration_action(self, step: Step, action_type: str) -> dict[str, Any]:
         if self._is_explicit_demo_mode(step.params):
