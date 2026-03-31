@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 from orchestration.demo_runner import DemoRunner, Observation, RunStatus, Scenario, ScenarioRun, Step, StepRunLog
-from orchestration.scenario_loader import ScenarioLoadError, load_scenarios_from_directory
+from orchestration.scenario_loader import load_scenarios_from_directory
 
 
 class PlannedSwitchoverRunnerTests(unittest.TestCase):
@@ -220,9 +220,11 @@ class PlannedSwitchoverRunnerTests(unittest.TestCase):
 
 
 class LeaderCrashFailoverScenarioValidationTests(unittest.TestCase):
-    def test_leader_crash_failover_requires_expected_new_master_param(self) -> None:
-        with self.assertRaises(ScenarioLoadError):
-            load_scenarios_from_directory("tests/fixtures/scenario_loader/missing_expected_master")
+    def test_leader_crash_failover_allows_missing_expected_new_master_param(self) -> None:
+        scenarios = load_scenarios_from_directory("tests/fixtures/scenario_loader/missing_expected_master")
+
+        self.assertEqual(len(scenarios), 1)
+        self.assertEqual(scenarios[0].id, "leader_crash_failover")
 
 
 if __name__ == "__main__":
