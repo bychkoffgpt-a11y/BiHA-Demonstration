@@ -4,7 +4,7 @@ description: >-
   Контролируемая плановая смена лидера на выбранную реплику без аварии:
   precheck проверяет только готовность кластера, а факт смены ролей валидируется после execute_switchover.
 params:
-  target_master: pg-node-2
+  target_master: __REQUIRED_TARGET_MASTER__
 steps:
   - name: precheck_cluster_health
     action: check_cluster_health
