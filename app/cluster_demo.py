@@ -1178,7 +1178,8 @@ def request_master_switchover() -> None:
     st.rerun()
 
 
-def switchover_master_role(cluster: ClusterConfig) -> dict[str, Any]:
+def switchover_master_role(cluster: ClusterConfig, target_master: str | None = None) -> dict[str, Any]:
+    operation_started_monotonic = time.monotonic()
     target_db = get_target_database(cluster, "rw")
     rows = fetch_all_node_metrics(cluster.nodes, target_db)
     result: dict[str, Any] = {
@@ -1186,10 +1187,18 @@ def switchover_master_role(cluster: ClusterConfig) -> dict[str, Any]:
         "success": False,
         "roles": {},
         "diagnostics": [],
+        "downtime_sec": None,
+        "orchestration_duration_sec": None,
     }
+    normalized_target_master = str(target_master or "").strip() or None
+
+    def finalize(payload: dict[str, Any]) -> dict[str, Any]:
+        payload["orchestration_duration_sec"] = round(time.monotonic() - operation_started_monotonic, 3)
+        return payload
+
     if not rows:
         result["messages"] = [("error", "Не удалось получить состояние узлов перед переключением master.")]
-        return result
+        return finalize(result)
 
     nodes_by_name = {node.name: node for node in cluster.nodes}
 
@@ -1214,38 +1223,68 @@ def switchover_master_role(cluster: ClusterConfig) -> dict[str, Any]:
                 f"Сейчас обнаружено: {len(masters)}.",
             )
         ]
-        return result
+        return finalize(result)
     if not slaves:
         result["messages"] = [("error", "Не найден активный slave, на который можно безопасно перевести роль master.")]
-        return result
+        return finalize(result)
 
     old_master_row = masters[0]
-    new_master_row = slaves[0]
+    if normalized_target_master is None:
+        new_master_row = slaves[0]
+    else:
+        slave_by_name = {str(row.get("node")): row for row in slaves}
+        new_master_row = slave_by_name.get(normalized_target_master)
+        if new_master_row is None:
+            result["messages"] = [
+                (
+                    "error",
+                    "Целевой узел для switchover не найден среди доступных slave. "
+                    f"target_master='{normalized_target_master}', available_slaves={sorted(slave_by_name)}.",
+                )
+            ]
+            result["diagnostics"] = [
+                {
+                    "step": "Выбор целевого slave",
+                    "target_master": normalized_target_master,
+                    "available_slaves": ", ".join(sorted(slave_by_name)) or "<none>",
+                }
+            ]
+            return finalize(result)
     old_master = nodes_by_name.get(str(old_master_row["node"]))
     new_master = nodes_by_name.get(str(new_master_row["node"]))
 
     if old_master is None or new_master is None:
         result["messages"] = [("error", "Не удалось сопоставить роли узлов с конфигурацией кластера.")]
-        return result
+        return finalize(result)
 
     if not old_master.control_via_ssh or not old_master.ssh_host:
         result["messages"] = [("error", f"Для узла master '{old_master.name}' не настроено SSH-управление.")]
-        return result
+        return finalize(result)
     if not new_master.control_via_ssh or not new_master.ssh_host:
         result["messages"] = [("error", f"Для узла slave '{new_master.name}' не настроено SSH-управление.")]
-        return result
+        return finalize(result)
 
     messages: list[tuple[str, str]] = []
     diagnostics: list[dict[str, str]] = []
     if len(slaves) > 1:
-        messages.append(
-            (
-                "warning",
-                f"Обнаружено несколько slave-узлов ({len(slaves)}). "
-                f"Для переключения выбран '{new_master.name}'.",
+        if normalized_target_master:
+            messages.append(
+                (
+                    "info",
+                    f"Обнаружено несколько slave-узлов ({len(slaves)}). "
+                    f"Для переключения использован target_master='{new_master.name}'.",
+                )
             )
-        )
+        else:
+            messages.append(
+                (
+                    "warning",
+                    f"Обнаружено несколько slave-узлов ({len(slaves)}). "
+                    f"Для переключения выбран '{new_master.name}'.",
+                )
+            )
 
+    downtime_started_monotonic = time.monotonic()
     ok, output = run_node_action(old_master, "stop")
     diagnostics.append(
         {
@@ -1264,9 +1303,10 @@ def switchover_master_role(cluster: ClusterConfig) -> dict[str, Any]:
         )
         result["messages"] = messages
         result["diagnostics"] = diagnostics
-        return result
+        return finalize(result)
 
     promoted = False
+    downtime_sec: float | None = None
     for _ in range(20):
         time.sleep(2)
         candidate_metrics = fetch_node_metrics(new_master, target_db)
@@ -1277,6 +1317,7 @@ def switchover_master_role(cluster: ClusterConfig) -> dict[str, Any]:
         )
         if candidate_status == "up" and candidate_class == "master":
             promoted = True
+            downtime_sec = round(max(time.monotonic() - downtime_started_monotonic, 0.0), 3)
             break
 
     if not promoted:
@@ -1304,10 +1345,11 @@ def switchover_master_role(cluster: ClusterConfig) -> dict[str, Any]:
                     "error",
                     f"Не удалось вернуть сервис на '{old_master.name}': {rollback_output or 'unknown error'}.",
                 )
-            )
+        )
         result["messages"] = messages
         result["diagnostics"] = diagnostics
-        return result
+        result["downtime_sec"] = round(max(time.monotonic() - downtime_started_monotonic, 0.0), 3)
+        return finalize(result)
 
     start_ok, start_output = run_node_action(old_master, "start")
     diagnostics.append(
@@ -1328,7 +1370,8 @@ def switchover_master_role(cluster: ClusterConfig) -> dict[str, Any]:
         )
         result["messages"] = messages
         result["diagnostics"] = diagnostics
-        return result
+        result["downtime_sec"] = downtime_sec
+        return finalize(result)
 
     for _ in range(20):
         time.sleep(2)
@@ -1350,7 +1393,8 @@ def switchover_master_role(cluster: ClusterConfig) -> dict[str, Any]:
             result["success"] = True
             result["roles"] = {"master": new_master.name, "slave": old_master.name}
             result["diagnostics"] = diagnostics
-            return result
+            result["downtime_sec"] = downtime_sec
+            return finalize(result)
 
     messages.append(
         (
@@ -1361,7 +1405,8 @@ def switchover_master_role(cluster: ClusterConfig) -> dict[str, Any]:
     )
     result["messages"] = messages
     result["diagnostics"] = diagnostics
-    return result
+    result["downtime_sec"] = downtime_sec
+    return finalize(result)
 
 
 def run_pending_service_operations(cluster: ClusterConfig) -> None:

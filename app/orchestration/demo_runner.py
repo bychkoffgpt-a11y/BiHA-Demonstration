@@ -323,12 +323,17 @@ class DemoRunner:
                 log.action_result = action_result
             self._record_run_metrics(run_id, step.action_type, action_result)
 
-            observation = self.wait_until(
-                step.wait_condition,
-                step.timeout,
-                cancel_event,
-                observation_source=self._resolve_observation_source(run_id, step),
-            )
+            if step.action_type.lower().strip() == "verify_availability":
+                if cancel_event.is_set():
+                    raise RuntimeError("Step cancelled")
+                observation = self._resolve_observation_source(run_id, step)()
+            else:
+                observation = self.wait_until(
+                    step.wait_condition,
+                    step.timeout,
+                    cancel_event,
+                    observation_source=self._resolve_observation_source(run_id, step),
+                )
             is_valid, actual_result, reason = self.validate(step.expected, observation)
 
             with self._lock:
@@ -467,8 +472,17 @@ class DemoRunner:
         started_monotonic = time.monotonic()
         cluster_config_path = self._resolve_cluster_config_path(step.params)
         cluster = load_cluster_config(cluster_config_path)
-        switchover_result = switchover_master_role(cluster)
-        switchover_duration_sec = round(time.monotonic() - started_monotonic, 3)
+        requested_target_master = str(step.params.get("target_master") or "").strip() or None
+        switchover_result = switchover_master_role(cluster, target_master=requested_target_master)
+        orchestration_duration_sec = round(time.monotonic() - started_monotonic, 3)
+        reported_duration = switchover_result.get("orchestration_duration_sec")
+        switchover_duration_sec = (
+            float(reported_duration)
+            if isinstance(reported_duration, (float, int))
+            else orchestration_duration_sec
+        )
+        downtime_sec_raw = switchover_result.get("downtime_sec")
+        downtime_sec = float(downtime_sec_raw) if isinstance(downtime_sec_raw, (float, int)) else None
         roles = switchover_result.get("roles") or {}
         old_leader = roles.get("slave")
         new_leader = roles.get("master")
@@ -491,6 +505,8 @@ class DemoRunner:
                 "diagnostics": diagnostics,
                 "messages": messages,
                 "switchover_duration_sec": switchover_duration_sec,
+                "downtime_sec": downtime_sec,
+                "target_master": requested_target_master,
             },
             "executed_at": datetime.now(UTC).isoformat(),
         }
@@ -655,7 +671,12 @@ class DemoRunner:
         cluster_state = self._fetch_cluster_state(step)
         with self._lock:
             run_metrics = dict(self._run_metrics.get(run_id, {}))
-        measured_downtime_sec = float(run_metrics.get("last_switchover_duration_sec", 0.0))
+        measured_downtime_sec = float(
+            run_metrics.get(
+                "last_switchover_downtime_sec",
+                run_metrics.get("last_switchover_duration_sec", 0.0),
+            )
+        )
         slo_window_sec = float(step.params.get("slo_window_sec", 60.0))
         availability_ratio = 1.0 if slo_window_sec <= 0 else max(0.0, 1.0 - (measured_downtime_sec / slo_window_sec))
         value = {
@@ -690,16 +711,24 @@ class DemoRunner:
         normalized_action = action_type.lower().strip()
         if normalized_action != "switchover":
             return
-        switchover_duration = (
+        orchestration_duration = (
             action_result.get("orchestration", {}).get("switchover_duration_sec")
             if isinstance(action_result.get("orchestration"), dict)
             else None
         )
-        if switchover_duration is None:
+        if orchestration_duration is None:
             return
+        switchover_downtime = (
+            action_result.get("orchestration", {}).get("downtime_sec")
+            if isinstance(action_result.get("orchestration"), dict)
+            else None
+        )
         with self._lock:
             metrics = self._run_metrics.setdefault(run_id, {})
-            metrics["last_switchover_duration_sec"] = float(switchover_duration)
+            metrics["last_switchover_duration_sec"] = float(orchestration_duration)
+            metrics["last_switchover_orchestration_duration_sec"] = float(orchestration_duration)
+            if isinstance(switchover_downtime, (float, int)):
+                metrics["last_switchover_downtime_sec"] = float(switchover_downtime)
 
     def _matches_condition(self, actual: Any, condition: Any) -> bool:
         if condition in ({}, None):
