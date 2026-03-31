@@ -6,11 +6,80 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 
-from orchestration.demo_runner import DemoRunner, Observation, RunStatus, Scenario, ScenarioRun, Step, StepRunLog
+from orchestration.demo_runner import (
+    CURRENT_STANDBY_TARGET_MARKER,
+    DemoRunner,
+    Observation,
+    RunStatus,
+    Scenario,
+    ScenarioRun,
+    Step,
+    StepRunLog,
+)
 from orchestration.scenario_loader import load_scenarios_from_directory
 
 
 class PlannedSwitchoverRunnerTests(unittest.TestCase):
+    def test_resolve_standby_target_uses_params_override(self) -> None:
+        runner = DemoRunner([])
+        step = Step(
+            action_type="stop_db_service",
+            target_node=CURRENT_STANDBY_TARGET_MARKER,
+            params={"target_standby": "pg-node-9"},
+        )
+
+        resolved = runner._resolve_action_target_node(step)
+
+        self.assertEqual(resolved, "pg-node-9")
+
+    def test_resolve_standby_target_fails_without_cluster_config_or_param(self) -> None:
+        runner = DemoRunner([])
+        step = Step(
+            action_type="stop_db_service",
+            target_node=CURRENT_STANDBY_TARGET_MARKER,
+            params={},
+        )
+
+        with self.assertRaises(RuntimeError) as raised:
+            runner._resolve_action_target_node(step)
+
+        self.assertIn("standby target cannot be resolved", str(raised.exception))
+
+    def test_resolve_standby_target_fails_when_cluster_has_no_standby(self) -> None:
+        class FakeCluster:
+            nodes = [object()]
+
+        def fake_load_cluster_config(_path):
+            return FakeCluster()
+
+        def fake_get_target_database(_cluster, _mode):
+            return "postgres"
+
+        def fake_fetch_all_node_metrics(_nodes, _db):
+            return [{"node": "pg-node-1", "role": "master", "tx_read_only": "off"}]
+
+        def fake_classify_node_role(role, _tx_read_only):
+            return str(role)
+
+        fake_module = types.SimpleNamespace(
+            classify_node_role=fake_classify_node_role,
+            fetch_all_node_metrics=fake_fetch_all_node_metrics,
+            get_target_database=fake_get_target_database,
+            load_cluster_config=fake_load_cluster_config,
+        )
+        runner = DemoRunner([])
+        step = Step(
+            action_type="stop_db_service",
+            target_node=CURRENT_STANDBY_TARGET_MARKER,
+            params={"cluster_config_path": "config/cluster.json"},
+        )
+
+        with patch.dict("sys.modules", {"cluster_demo": fake_module}):
+            with self.assertRaises(RuntimeError) as raised:
+                runner._resolve_action_target_node(step)
+
+        self.assertIn("No standby nodes detected", str(raised.exception))
+
     def test_execute_real_switchover_passes_target_master(self) -> None:
         captured: dict[str, object] = {}
 
