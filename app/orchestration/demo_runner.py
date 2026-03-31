@@ -4,6 +4,7 @@ import copy
 import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import UTC, datetime
@@ -340,19 +341,25 @@ class DemoRunner:
             self._record_step_runtime_context(run_id, step, action_result)
         except Exception as exc:
             last_observed = getattr(exc, "last_observed", None)
+            timeout_payload = getattr(exc, "timeout_payload", None)
+            diagnostic_hint = getattr(exc, "diagnostic_hint", None)
+            if diagnostic_hint is None:
+                diagnostic_hint = self._infer_roles_hint(last_observed)
             with self._lock:
                 run = self._runs[run_id]
                 log = run.step_logs[step_index]
-                if last_observed is not None:
+                if timeout_payload is not None:
+                    log.actual_result = timeout_payload
+                elif last_observed is not None:
                     log.actual_result = {
                         "source": "wait_until.timeout",
                         "value": last_observed,
                     }
                 log.status = "failed"
-                log.error_reason = str(exc)
+                log.error_reason = self._compose_error_reason(str(exc), diagnostic_hint)
                 log.finished_at = datetime.now(UTC)
                 run.status = RunStatus.FAILED
-                run.error_reason = f"Step {step_index + 1} failed: {exc}"
+                run.error_reason = self._compose_error_reason(f"Step {step_index + 1} failed: {exc}", diagnostic_hint)
                 run.finished_at = datetime.now(UTC)
             LOGGER.exception(
                 "Step action failed | run_id=%s step=%s action=%s error=%s",
@@ -409,19 +416,25 @@ class DemoRunner:
                     raise RuntimeError(reason or "Step validation failed")
         except Exception as exc:
             last_observed = getattr(exc, "last_observed", None)
+            timeout_payload = getattr(exc, "timeout_payload", None)
+            diagnostic_hint = getattr(exc, "diagnostic_hint", None)
+            if diagnostic_hint is None:
+                diagnostic_hint = self._infer_roles_hint(last_observed)
             with self._lock:
                 run = self._runs[run_id]
                 log = run.step_logs[step_index]
-                if last_observed is not None:
+                if timeout_payload is not None:
+                    log.actual_result = timeout_payload
+                elif last_observed is not None:
                     log.actual_result = {
                         "source": "wait_until.timeout",
                         "value": last_observed,
                     }
                 log.status = "failed"
-                log.error_reason = str(exc)
+                log.error_reason = self._compose_error_reason(str(exc), diagnostic_hint)
                 log.finished_at = datetime.now(UTC)
                 run.status = RunStatus.FAILED
-                run.error_reason = f"Step {step_index + 1} failed: {exc}"
+                run.error_reason = self._compose_error_reason(f"Step {step_index + 1} failed: {exc}", diagnostic_hint)
                 run.finished_at = datetime.now(UTC)
             LOGGER.exception(
                 "Step execution failed after action | run_id=%s step=%s error=%s",
@@ -700,6 +713,7 @@ class DemoRunner:
         source_fn = observation_source or self._observe_default
         deadline = time.monotonic() + timeout
         last_observed: Any = None
+        recent_observations: deque[dict[str, Any]] = deque(maxlen=5)
         LOGGER.info(
             "Waiting for condition | timeout_sec=%s condition=%s",
             timeout,
@@ -712,6 +726,14 @@ class DemoRunner:
                 raise RuntimeError("Step cancelled")
             observation = source_fn()
             last_observed = observation.value
+            recent_observations.append(
+                {
+                    "timestamp": observation.timestamp.isoformat(),
+                    "source": observation.source,
+                    "metric_event": observation.metric_event,
+                    "value": observation.value,
+                }
+            )
             if self._matches_condition(observation.value, condition, run_id=run_id):
                 LOGGER.info("Condition met | observed_value=%r source=%s", observation.value, observation.source)
                 return observation
@@ -727,8 +749,77 @@ class DemoRunner:
             f"Step timeout after {timeout} sec waiting for condition={condition}; "
             f"last_observed={last_observed!r}"
         )
+        diagnostic_hint = self._infer_timeout_hint(condition, list(recent_observations))
+        timeout_payload = {
+            "source": "wait_until.timeout",
+            "timeout_sec": timeout,
+            "condition": condition,
+            "hint": diagnostic_hint,
+            "last_observed": last_observed,
+            "observations": list(recent_observations),
+        }
         setattr(timeout_error, "last_observed", last_observed)
+        setattr(timeout_error, "timeout_payload", timeout_payload)
+        setattr(timeout_error, "diagnostic_hint", diagnostic_hint)
         raise timeout_error
+
+    @staticmethod
+    def _normalize_hint(hint: str | None) -> str | None:
+        if not hint:
+            return None
+        normalized = "_".join(str(hint).strip().lower().split())
+        return normalized or None
+
+    def _compose_error_reason(self, message: str, hint: str | None) -> str:
+        normalized_hint = self._normalize_hint(hint)
+        if not normalized_hint:
+            return message
+        return f"{message}; hint={normalized_hint}"
+
+    def _infer_timeout_hint(self, condition: dict[str, Any], observations: list[dict[str, Any]]) -> str | None:
+        hints = [
+            self._infer_roles_hint(observation.get("value"))
+            for observation in observations
+            if isinstance(observation, dict)
+        ]
+        for preferred_hint in ("multiple_masters", "no_master", "master_still_alive"):
+            if preferred_hint in hints:
+                return preferred_hint
+
+        role_snapshots: list[dict[str, Any]] = []
+        for observation in observations:
+            if not isinstance(observation, dict):
+                continue
+            value = observation.get("value")
+            if not isinstance(value, dict):
+                continue
+            current_roles = value.get("current_roles")
+            if isinstance(current_roles, dict):
+                role_snapshots.append(current_roles)
+        if len(role_snapshots) >= 2 and all(snapshot == role_snapshots[0] for snapshot in role_snapshots[1:]):
+            return "no_role_change_detected"
+        return None
+
+    @staticmethod
+    def _infer_roles_hint(value: Any) -> str | None:
+        if not isinstance(value, dict):
+            return None
+        current_roles = value.get("current_roles")
+        if not isinstance(current_roles, dict):
+            return None
+        masters_raw = current_roles.get("masters")
+        masters = masters_raw if isinstance(masters_raw, list) else []
+        if len(masters) > 1:
+            return "multiple_masters"
+        if len(masters) == 0:
+            return "no_master"
+        master_name = current_roles.get("master")
+        per_node = value.get("nodes")
+        if isinstance(master_name, str) and isinstance(per_node, dict):
+            master_info = per_node.get(master_name)
+            if isinstance(master_info, dict) and str(master_info.get("status", "")).lower() == "up":
+                return "master_still_alive"
+        return None
 
     def validate(self, run_id: str, expected: Any, observation: Observation) -> tuple[bool, Any, str | None]:
         """Проверка результата шага на соответствие expected."""
@@ -799,7 +890,16 @@ class DemoRunner:
         from cluster_demo import classify_node_role
 
         cluster_state = self._fetch_cluster_state(step)
-        roles_by_node = {str(row.get("node")): str(row.get("role")) for row in cluster_state["rows"]}
+        nodes = {
+            str(row.get("node")): {
+                "status": row.get("status"),
+                "role": row.get("role"),
+                "tx_read_only": row.get("tx_read_only"),
+                "replication_lag_sec": row.get("replication_lag_sec", row.get("replication_lag")),
+            }
+            for row in cluster_state["rows"]
+        }
+        roles_by_node = {node: str(node_data.get("role")) for node, node_data in nodes.items()}
         masters = [
             str(row.get("node"))
             for row in cluster_state["rows"]
@@ -820,7 +920,9 @@ class DemoRunner:
         value = {
             "cluster_config_path": str(cluster_state["cluster_config_path"]),
             "current_roles": current_roles,
+            "nodes": nodes,
         }
+        value["hint"] = self._infer_roles_hint(value)
         return Observation(
             timestamp=datetime.now(UTC),
             source="cluster-state",
