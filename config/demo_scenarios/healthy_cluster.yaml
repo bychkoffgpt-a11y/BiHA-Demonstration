@@ -22,6 +22,18 @@ steps:
     action: check_cluster_roles
     params:
       cluster_config_path: config/cluster.json
+    wait_condition:
+      current_roles:
+        master:
+          in:
+            - pg-node-1
+            - pg-node-2
+    expected:
+      current_roles:
+        master:
+          in:
+            - pg-node-1
+            - pg-node-2
     details: Проверить корректное распределение ролей leader/replica.
 success_criteria:
   - В кластере ровно 1 лидер.
