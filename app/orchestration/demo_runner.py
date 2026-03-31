@@ -381,8 +381,23 @@ class DemoRunner:
     def execute_action(self, step: Step) -> dict[str, Any]:
         """Выполнение действия шага с fault-injection guardrails и rollback metadata."""
         action_type = step.action_type.lower().strip()
+        LOGGER.info(
+            "Starting scenario action execution | step=%s action_type=%s target=%s timeout_sec=%s params=%s",
+            step.name,
+            action_type,
+            step.target_node,
+            step.timeout_sec,
+            step.params,
+        )
         if action_type in ORCHESTRATION_ACTIONS:
-            return self._execute_orchestration_action(step, action_type)
+            result = self._execute_orchestration_action(step, action_type)
+            LOGGER.info(
+                "Completed scenario orchestration action | step=%s action_type=%s result=%s",
+                step.name,
+                action_type,
+                result,
+            )
+            return result
 
         if action_type not in FAULT_INJECTION_ACTIONS:
             raise ValueError(f"Unknown action_type={action_type!r}")
@@ -392,7 +407,7 @@ class DemoRunner:
             target_node=step.target_node,
             params=step.params,
         )
-        return {
+        payload = {
             "action_type": result.action_type,
             "target_node": step.target_node,
             "params": step.params,
@@ -400,6 +415,13 @@ class DemoRunner:
             "fault_injection": result.details,
             "executed_at": datetime.now(UTC).isoformat(),
         }
+        LOGGER.info(
+            "Completed scenario fault-injection action | step=%s action_type=%s result=%s",
+            step.name,
+            action_type,
+            payload,
+        )
+        return payload
 
     def _execute_orchestration_action(self, step: Step, action_type: str) -> dict[str, Any]:
         if self._is_explicit_demo_mode(step.params):
