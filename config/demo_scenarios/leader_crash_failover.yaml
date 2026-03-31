@@ -37,11 +37,19 @@ steps:
       current_roles:
         master:
           not_equals: __RUN_METRIC:old_master__
+          in:
+            - pg-node-1
+            - pg-node-2
+            - pg-node-3
     timeout: 45
     expected:
       current_roles:
         master:
           not_equals: __RUN_METRIC:old_master__
+          in:
+            - pg-node-1
+            - pg-node-2
+            - pg-node-3
     details: Дождаться автоматического выбора нового лидера.
   - name: validate_expected_new_master
     action: verify_roles
