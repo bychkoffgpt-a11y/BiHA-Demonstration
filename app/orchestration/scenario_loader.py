@@ -84,7 +84,6 @@ def _load_scenario_file(path: Path) -> ScenarioDTO:
     scenario_params = raw_data.get("params") or {}
     if scenario_params and not isinstance(scenario_params, dict):
         raise ScenarioLoadError(f"{path}: 'params' must be a mapping when specified")
-    _validate_scenario_params(path, str(raw_data["id"]), scenario_params)
 
     steps_raw = _render_scenario_templates(raw_data["steps"], {"params": scenario_params})
     if not isinstance(steps_raw, list) or not steps_raw:
@@ -111,16 +110,6 @@ def _validate_required_fields(path: Path, raw_data: dict[str, Any]) -> None:
     missing_fields = [field for field in REQUIRED_SCENARIO_FIELDS if field not in raw_data]
     if missing_fields:
         raise ScenarioLoadError(f"{path}: missing required fields: {', '.join(missing_fields)}")
-
-
-def _validate_scenario_params(path: Path, scenario_id: str, params: dict[str, Any]) -> None:
-    if scenario_id != "leader_crash_failover":
-        return
-    expected_new_master = params.get("expected_new_master")
-    if not isinstance(expected_new_master, str) or not expected_new_master.strip():
-        raise ScenarioLoadError(
-            f"{path}: params.expected_new_master must be a non-empty string for leader_crash_failover"
-        )
 
 
 def _parse_step(path: Path, index: int, step_data: Any) -> StepDTO:
