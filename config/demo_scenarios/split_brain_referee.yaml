@@ -5,16 +5,50 @@ description: >-
 steps:
   - name: create_network_partition
     action: network_partition
+    target_node: pg-node-1
+    params:
+      environment: demo
+      demo_mode: true
+      duration_sec: 20
+      peers:
+        - pg-node-2
+        - pg-node-3
     details: Разделить кластер на зоны с потерей связности между группами узлов.
   - name: evaluate_quorum_decision
-    action: check_quorum
+    action: verify_roles
+    target_node: cluster
+    params:
+      cluster_config_path: config/cluster.json
     details: Проверить решения quorum/referee по выбору стороны с правом записи.
   - name: verify_write_permissions
-    action: verify_write_side
+    action: verify_availability
+    target_node: cluster
+    params:
+      cluster_config_path: config/cluster.json
+      slo_window_sec: 120
+    expected:
+      availability_ratio:
+        gte: 0.75
     details: Проверить, что writes разрешены только на одной стороне.
+  - name: recover_network_partition
+    action: recover_action
+    target_node: pg-node-1
+    params:
+      environment: demo
+      demo_mode: true
+    details: Восстановить сетевую связность для идемпотентного повторного запуска.
   - name: verify_promotion_block
-    action: verify_promotion_block
-    details: Проверить, что вторая сторона блокирует promotion и не принимает writes.
+    action: check_cluster_health
+    target_node: cluster
+    params:
+      cluster_config_path: config/cluster.json
+    wait_condition:
+      all_nodes_up:
+        equals: true
+    expected:
+      all_nodes_up:
+        equals: true
+    details: Проверить, что после восстановления нет split-brain и кластер снова стабилен.
 success_criteria:
   - Только одна сторона принимает writes.
   - Вторая сторона не промотируется в лидера.

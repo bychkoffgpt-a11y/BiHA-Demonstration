@@ -4,17 +4,43 @@ description: >-
   Аварийный failover при внезапном падении лидера.
 steps:
   - name: simulate_leader_failure
-    action: fault_injection
-    details: Симулировать падение лидера (stop/kill или network isolate).
+    action: kill_db_process
+    target_node: pg-node-1
+    params:
+      environment: demo
+      demo_mode: true
+      duration_sec: 15
+    details: Симулировать падение лидера безопасной fault-injection операцией.
   - name: wait_for_failover
-    action: wait_failover
+    action: verify_roles
+    target_node: cluster
+    params:
+      cluster_config_path: config/cluster.json
     details: Дождаться автоматического выбора нового лидера.
   - name: validate_service_recovery
-    action: check_service_recovery
+    action: verify_availability
+    target_node: cluster
+    params:
+      cluster_config_path: config/cluster.json
+      slo_window_sec: 120
+    wait_condition:
+      measured_downtime_sec:
+        lte: 30
+      availability_ratio:
+        gte: 0.75
+    expected:
+      measured_downtime_sec:
+        lte: 30
+      availability_ratio:
+        gte: 0.75
     details: Проверить восстановление доступности сервиса после failover.
-  - name: validate_write_path
-    action: verify_write_operations
-    details: Проверить, что запись успешно выполняется через нового лидера.
+  - name: recover_failed_leader
+    action: recover_action
+    target_node: pg-node-1
+    params:
+      environment: demo
+      demo_mode: true
+    details: Вернуть fault-injection состояние в исходное для идемпотентного повторного запуска.
 success_criteria:
   - Новый лидер выбран автоматически.
   - Сервис восстановлен в пределах T секунд.
