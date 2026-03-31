@@ -35,6 +35,7 @@ FAULT_INJECTION_ACTIONS = {
 }
 
 CURRENT_LEADER_TARGET_MARKER = "__CURRENT_LEADER__"
+CURRENT_STANDBY_TARGET_MARKER = "__CURRENT_STANDBY__"
 ROLLBACK_ID_FROM_STEP_PREFIX = "__ROLLBACK_ID:"
 
 
@@ -471,6 +472,14 @@ class DemoRunner:
         action_type = step.action_type.lower().strip()
         resolved_target_node = self._resolve_action_target_node(step)
         resolved_params = self._resolve_action_params(run_id, step, action_type)
+        resolved_step = Step(
+            action_type=step.action_type,
+            target_node=resolved_target_node,
+            params=resolved_params,
+            wait_condition=step.wait_condition,
+            timeout=step.timeout,
+            expected=step.expected,
+        )
         step_label = str(step.params.get("step_name") or step.action_type)
         LOGGER.info(
             "Starting scenario action execution | step=%s action_type=%s target=%s timeout_sec=%s params=%s",
@@ -481,7 +490,7 @@ class DemoRunner:
             resolved_params,
         )
         if action_type in ORCHESTRATION_ACTIONS:
-            result = self._execute_orchestration_action(step, action_type)
+            result = self._execute_orchestration_action(resolved_step, action_type)
             LOGGER.info(
                 "Completed scenario orchestration action | step=%s action_type=%s result=%s",
                 step_label,
@@ -515,15 +524,44 @@ class DemoRunner:
         return payload
 
     def _resolve_action_target_node(self, step: Step) -> str:
-        if step.target_node != CURRENT_LEADER_TARGET_MARKER:
+        if step.target_node not in {CURRENT_LEADER_TARGET_MARKER, CURRENT_STANDBY_TARGET_MARKER}:
             return step.target_node
 
         from cluster_demo import classify_node_role, fetch_all_node_metrics, get_target_database, load_cluster_config
 
-        cluster_config_path = self._resolve_cluster_config_path(step.params)
+        configured_standby = str(step.params.get("target_standby") or "").strip()
+        if step.target_node == CURRENT_STANDBY_TARGET_MARKER and configured_standby:
+            return configured_standby
+
+        cluster_config_raw = step.params.get("cluster_config_path")
+        if not cluster_config_raw:
+            if step.target_node == CURRENT_STANDBY_TARGET_MARKER:
+                raise RuntimeError(
+                    "Runtime validation failed: standby target cannot be resolved. "
+                    "Provide params.target_standby or params.cluster_config_path with at least one standby node."
+                )
+            raise ValueError(
+                "cluster_config_path is required for orchestration steps. "
+                "Set params.cluster_config_path in the scenario YAML."
+            )
+
+        cluster_config_path = Path(str(cluster_config_raw)).expanduser().resolve()
         cluster = load_cluster_config(cluster_config_path)
         target_db = get_target_database(cluster, "rw")
         metrics_rows = fetch_all_node_metrics(cluster.nodes, target_db)
+        standby_nodes = sorted(
+            str(row.get("node"))
+            for row in metrics_rows
+            if classify_node_role(row.get("role"), row.get("tx_read_only")) == "slave"
+        )
+        if step.target_node == CURRENT_STANDBY_TARGET_MARKER:
+            if not standby_nodes:
+                raise RuntimeError(
+                    "Runtime validation failed: standby target cannot be resolved from cluster state. "
+                    "No standby nodes detected. Provide params.target_standby or restore replication first."
+                )
+            return standby_nodes[0]
+
         masters = sorted(
             str(row.get("node"))
             for row in metrics_rows
@@ -1125,7 +1163,7 @@ def build_default_scenarios() -> list[Scenario]:
             steps=[
                 Step(
                     action_type="stop_db_service",
-                    target_node="pg-node-2",
+                    target_node=CURRENT_STANDBY_TARGET_MARKER,
                     params={"service": "postgrespro", "environment": "demo", "demo_mode": True},
                     wait_condition={"equals": "ok"},
                     timeout=15,
@@ -1133,7 +1171,7 @@ def build_default_scenarios() -> list[Scenario]:
                 ),
                 Step(
                     action_type="recover_action",
-                    target_node="pg-node-2",
+                    target_node=CURRENT_STANDBY_TARGET_MARKER,
                     params={"environment": "demo", "demo_mode": True},
                     wait_condition={"equals": "ok"},
                     timeout=20,
