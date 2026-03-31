@@ -381,19 +381,20 @@ class DemoRunner:
     def execute_action(self, step: Step) -> dict[str, Any]:
         """Выполнение действия шага с fault-injection guardrails и rollback metadata."""
         action_type = step.action_type.lower().strip()
+        step_label = str(step.params.get("step_name") or step.action_type)
         LOGGER.info(
             "Starting scenario action execution | step=%s action_type=%s target=%s timeout_sec=%s params=%s",
-            step.name,
+            step_label,
             action_type,
             step.target_node,
-            step.timeout_sec,
+            step.timeout,
             step.params,
         )
         if action_type in ORCHESTRATION_ACTIONS:
             result = self._execute_orchestration_action(step, action_type)
             LOGGER.info(
                 "Completed scenario orchestration action | step=%s action_type=%s result=%s",
-                step.name,
+                step_label,
                 action_type,
                 result,
             )
@@ -417,7 +418,7 @@ class DemoRunner:
         }
         LOGGER.info(
             "Completed scenario fault-injection action | step=%s action_type=%s result=%s",
-            step.name,
+            step_label,
             action_type,
             payload,
         )
