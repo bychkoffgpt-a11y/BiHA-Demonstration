@@ -218,6 +218,50 @@ class PlannedSwitchoverRunnerTests(unittest.TestCase):
             "pg-node-1",
         )
 
+    def test_matches_condition_supports_count_operators(self) -> None:
+        runner = DemoRunner([])
+
+        is_match = runner._matches_condition(
+            {"current_roles": {"masters": ["pg-node-2"], "slaves": ["pg-node-1"]}},
+            {
+                "current_roles": {
+                    "masters": {"count_equals": 1},
+                    "slaves": {"count_gte": 1, "count_lte": 2},
+                }
+            },
+        )
+
+        self.assertTrue(is_match)
+
+    def test_observe_roles_exposes_role_cardinality_flags(self) -> None:
+        def fake_classify_node_role(role, _tx_read_only):
+            return str(role)
+
+        fake_module = types.SimpleNamespace(classify_node_role=fake_classify_node_role)
+        runner = DemoRunner([])
+        runner._fetch_cluster_state = lambda _step: {
+            "cluster_config_path": "config/cluster.json",
+            "rows": [
+                {"node": "pg-node-1", "status": "up", "role": "slave", "tx_read_only": "on", "replication_lag_sec": 0.2},
+                {"node": "pg-node-2", "status": "up", "role": "master", "tx_read_only": "off", "replication_lag_sec": 0.0},
+            ],
+        }
+        step = Step(
+            action_type="verify_roles",
+            target_node="cluster",
+            params={"cluster_config_path": "config/cluster.json"},
+        )
+
+        with patch.dict("sys.modules", {"cluster_demo": fake_module}):
+            observation = runner._observe_roles(step)
+
+        current_roles = observation.value["current_roles"]
+        self.assertEqual(current_roles["master_count"], 1)
+        self.assertEqual(current_roles["slave_count"], 1)
+        self.assertTrue(current_roles["has_single_master"])
+        self.assertTrue(current_roles["all_other_nodes_are_slaves"])
+        self.assertTrue(current_roles["cardinality_ok"])
+
 
 class LeaderCrashFailoverScenarioValidationTests(unittest.TestCase):
     def test_leader_crash_failover_allows_missing_expected_new_master_param(self) -> None:

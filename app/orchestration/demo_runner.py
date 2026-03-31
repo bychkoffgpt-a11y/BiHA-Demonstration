@@ -929,7 +929,14 @@ class DemoRunner:
             "slave": slaves[0] if len(slaves) == 1 else None,
             "masters": masters,
             "slaves": slaves,
+            "master_count": len(masters),
+            "slave_count": len(slaves),
             "roles_by_node": roles_by_node,
+            "has_single_master": len(masters) == 1,
+            "all_other_nodes_are_slaves": len(slaves) == (len(cluster_state["rows"]) - 1) and bool(cluster_state["rows"]),
+            "cardinality_ok": len(masters) == 1
+            and len(slaves) == (len(cluster_state["rows"]) - 1)
+            and bool(cluster_state["rows"]),
         }
         value = {
             "cluster_config_path": str(cluster_state["cluster_config_path"]),
@@ -1013,7 +1020,18 @@ class DemoRunner:
         if isinstance(condition, str):
             condition = self._resolve_runtime_reference(run_id, condition)
         if isinstance(condition, dict):
-            operator_keys = {"equals", "not_equals", "lte", "gte", "lt", "gt", "in"}
+            operator_keys = {
+                "equals",
+                "not_equals",
+                "lte",
+                "gte",
+                "lt",
+                "gt",
+                "in",
+                "count_equals",
+                "count_gte",
+                "count_lte",
+            }
             if condition.keys() and set(condition.keys()).issubset(operator_keys):
                 return self._apply_scalar_condition(actual, condition, run_id=run_id)
             if not isinstance(actual, dict):
@@ -1025,6 +1043,11 @@ class DemoRunner:
         return actual == condition
 
     def _apply_scalar_condition(self, actual: Any, condition: dict[str, Any], run_id: str | None = None) -> bool:
+        def _collection_size(value: Any) -> int | None:
+            if isinstance(value, (list, tuple, set, dict, str)):
+                return len(value)
+            return None
+
         equals_value = self._resolve_runtime_condition_value(run_id, condition.get("equals"))
         if "equals" in condition and actual != equals_value:
             return False
@@ -1041,6 +1064,16 @@ class DemoRunner:
             return False
         if "in" in condition and actual not in condition["in"]:
             return False
+        collection_size = _collection_size(actual)
+        if "count_equals" in condition:
+            if collection_size is None or collection_size != int(condition["count_equals"]):
+                return False
+        if "count_gte" in condition:
+            if collection_size is None or collection_size < int(condition["count_gte"]):
+                return False
+        if "count_lte" in condition:
+            if collection_size is None or collection_size > int(condition["count_lte"]):
+                return False
         return True
 
     def _resolve_runtime_condition_value(self, run_id: str | None, value: Any) -> Any:
