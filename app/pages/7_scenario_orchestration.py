@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pandas as pd
 import streamlit as st
@@ -135,6 +136,7 @@ if run.error_reason:
     st.error(f"Причина ошибки/остановки: {run.error_reason}")
 
 rows = []
+hints: list[str] = []
 
 
 def _to_display_value(value: object) -> str:
@@ -145,7 +147,37 @@ def _to_display_value(value: object) -> str:
     return str(value)
 
 
+def _extract_hint(error_reason: object, actual_result: object) -> str | None:
+    hint_candidates: list[str] = []
+    if isinstance(error_reason, str):
+        match = re.search(r"hint=([a-z0-9_]+)", error_reason)
+        if match:
+            hint_candidates.append(match.group(1))
+    if isinstance(actual_result, dict):
+        actual_hint = actual_result.get("hint")
+        if isinstance(actual_hint, str):
+            hint_candidates.append(actual_hint)
+        last_observed = actual_result.get("last_observed")
+        if isinstance(last_observed, dict):
+            observed_hint = last_observed.get("hint")
+            if isinstance(observed_hint, str):
+                hint_candidates.append(observed_hint)
+    for candidate in hint_candidates:
+        normalized = "_".join(candidate.strip().lower().split())
+        if normalized:
+            return normalized
+    return None
+
+
+run_level_hint = _extract_hint(run.error_reason, None)
+if run_level_hint:
+    hints.append(run_level_hint)
+
+
 for log in run.step_logs:
+    hint = _extract_hint(log.error_reason, log.actual_result)
+    if hint:
+        hints.append(hint)
     rows.append(
         {
             "Шаг": log.index + 1,
@@ -161,6 +193,11 @@ for log in run.step_logs:
 
 st.subheader("Лог шагов")
 st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+if hints:
+    st.subheader("Диагностические hints")
+    for hint in sorted(set(hints)):
+        st.code(hint, language="text")
 
 if run.status == RunStatus.SUCCEEDED:
     st.success("Итоговый verdict: SCENARIO PASSED")
