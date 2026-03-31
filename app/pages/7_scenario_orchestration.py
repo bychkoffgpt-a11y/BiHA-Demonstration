@@ -87,6 +87,7 @@ for log in run.step_logs:
             "Шаг": log.index + 1,
             "Action": log.action_type,
             "Target": log.target_node,
+            "Timeout (sec)": log.timeout,
             "Ожидаемый результат": log.expected_result,
             "Фактический результат": log.actual_result,
             "Статус шага": log.status,

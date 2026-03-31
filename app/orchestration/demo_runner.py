@@ -80,6 +80,7 @@ class StepRunLog:
     index: int
     action_type: str
     target_node: str
+    timeout: float
     expected_result: Any
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -147,6 +148,7 @@ class DemoRunner:
                         index=index,
                         action_type=step.action_type,
                         target_node=step.target_node,
+                        timeout=step.timeout,
                         expected_result=step.expected,
                     )
                     for index, step in enumerate(scenario.steps)
