@@ -688,12 +688,13 @@ def get_target_database(cluster: ClusterConfig, mode: str) -> str:
     return extract_dbname_from_dsn(cluster.vip_dsn)
 
 
-def load_cluster_config(path: Path) -> ClusterConfig:
-    if not path.exists():
+def load_cluster_config(path: Path | str) -> ClusterConfig:
+    cfg_path = Path(path)
+    if not cfg_path.exists():
         raise FileNotFoundError(f"Config not found: {path}")
-    if not path.is_file():
+    if not cfg_path.is_file():
         raise ValueError(f"Expected a JSON config file, got a directory: {path}")
-    cfg = json.loads(path.read_text(encoding="utf-8"))
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
     allowed_keys = {field.name for field in fields(NodeConfig)}
     nodes = [NodeConfig(**{k: v for k, v in item.items() if k in allowed_keys}) for item in cfg.get("nodes", [])]
     vip_dsn = cfg.get("vip_dsn")
