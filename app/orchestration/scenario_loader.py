@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,8 @@ LEGACY_ACTION_ALIASES = {
     "check_service_recovery": "verify_availability",
     "verify_write_operations": "verify_availability",
 }
+
+LOGGER = logging.getLogger(__name__)
 
 
 class ScenarioLoadError(ValueError):
@@ -154,6 +157,14 @@ def _parse_step(path: Path, index: int, step_data: Any) -> StepDTO:
     if wait_condition in ({}, None):
         wait_condition = _default_wait_condition_for_action(action_type)
     expected = _normalize_expected(expected, action_type)
+    normalized_action = action_type.lower().strip()
+    if normalized_action == "verify_roles" and (wait_condition in ({}, None) or expected is None):
+        LOGGER.warning(
+            "%s: step #%s uses verify_roles without explicit wait_condition/expected; "
+            "this may produce a weak failover check",
+            path,
+            index + 1,
+        )
 
     return StepDTO(
         action_type=action_type,
