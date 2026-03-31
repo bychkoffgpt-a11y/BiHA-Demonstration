@@ -16,6 +16,15 @@ steps:
     target_node: cluster
     params:
       cluster_config_path: config/cluster.json
+    wait_condition:
+      current_roles:
+        master:
+          equals: pg-node-2
+    timeout: 45
+    expected:
+      current_roles:
+        master:
+          equals: pg-node-2
     details: Дождаться автоматического выбора нового лидера.
   - name: validate_service_recovery
     action: verify_availability
