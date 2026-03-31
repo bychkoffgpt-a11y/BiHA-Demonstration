@@ -137,11 +137,15 @@ if run.error_reason:
 
 rows = []
 hints: list[str] = []
+NOT_APPLICABLE_TEXT = "не применимо/не логируется"
 
 
 def _to_display_value(value: object) -> str:
     if value is None:
-        return ""
+        return NOT_APPLICABLE_TEXT
+    if isinstance(value, str):
+        normalized = value.strip()
+        return normalized or NOT_APPLICABLE_TEXT
     if isinstance(value, (dict, list, tuple)):
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
     return str(value)
@@ -171,9 +175,10 @@ def _extract_hint(error_reason: object, actual_result: object) -> str | None:
 
 def _extract_executed_commands(action_result: object) -> str:
     if not isinstance(action_result, dict):
-        return ""
+        return NOT_APPLICABLE_TEXT
 
     commands: list[str] = []
+    details_fallback: str | None = None
 
     fault = action_result.get("fault_injection")
     if isinstance(fault, dict):
@@ -183,6 +188,12 @@ def _extract_executed_commands(action_result: object) -> str:
 
     orchestration = action_result.get("orchestration")
     if isinstance(orchestration, dict):
+        details = orchestration.get("details")
+        if isinstance(details, str) and details.strip():
+            details_fallback = details.strip()
+        elif details is not None:
+            details_fallback = _to_display_value(details)
+
         diagnostics = orchestration.get("diagnostics")
         if isinstance(diagnostics, list):
             for entry in diagnostics:
@@ -198,7 +209,16 @@ def _extract_executed_commands(action_result: object) -> str:
                             commands.append(command)
 
     unique_commands = list(dict.fromkeys(commands))
-    return "\n".join(unique_commands)
+    if unique_commands:
+        return "\n".join(unique_commands)
+
+    if details_fallback:
+        return f"(нет команд: {details_fallback})"
+
+    if action_result:
+        return "(нет команд: read-only проверка метрик)"
+
+    return NOT_APPLICABLE_TEXT
 
 
 run_level_hint = _extract_hint(run.error_reason, None)
