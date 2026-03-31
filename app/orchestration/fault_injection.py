@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Callable
 
+
+LOGGER = logging.getLogger(__name__)
 
 RECOVER_ACTIONS = {"resume", "recover_action"}
 ALLOWED_ACTIONS = {
@@ -63,7 +67,7 @@ class FaultInjectionController:
         self._validate_guardrails(action_type=normalized_action, params=params)
 
         rollback_entry = self._apply(action_type=normalized_action, target_node=target_node, params=params)
-        verify = self._verify(action_type=normalized_action, target_node=target_node)
+        verify = self._verify(action_type=normalized_action, target_node=target_node, params=params)
         if not verify["ok"]:
             rollback_payload = rollback_entry.rollback_fn()
             raise RuntimeError(
@@ -157,11 +161,26 @@ class FaultInjectionController:
                 return {"action": "start_db_service", "target_node": target_node, "ok": True}
 
         elif action_type == "kill_db_process":
+            node, cluster_config_path = self._resolve_target_node_config(target_node=target_node, params=params)
+            stop_result = self._run_node_action(node=node, action="stop")
             self._killed_process_nodes.add(target_node)
 
             def rollback_fn() -> dict[str, Any]:
+                start_result = self._run_node_action(node=node, action="start")
                 self._killed_process_nodes.discard(target_node)
-                return {"action": "restart_db_process", "target_node": target_node, "ok": True}
+                return {
+                    "action": "restart_db_process",
+                    "target_node": target_node,
+                    "cluster_config_path": str(cluster_config_path),
+                    **start_result,
+                }
+
+            if not stop_result["ok"]:
+                raise RuntimeError(
+                    "kill_db_process failed: "
+                    f"node={target_node}, ssh_host={node.ssh_host}, command={stop_result['command']}, "
+                    f"stdout={stop_result['stdout']}, stderr={stop_result['stderr']}"
+                )
 
         elif action_type == "network_partition":
             self._partitioned_nodes.add(target_node)
@@ -188,22 +207,99 @@ class FaultInjectionController:
             rollback_fn=rollback_fn,
         )
 
-    def _verify(self, action_type: str, target_node: str) -> dict[str, Any]:
+    def _verify(self, action_type: str, target_node: str, params: dict[str, Any]) -> dict[str, Any]:
         if action_type == "stop_db_service":
             ok = target_node in self._service_stopped_nodes
+            reason = None if ok else f"state not applied for action '{action_type}'"
         elif action_type == "kill_db_process":
-            ok = target_node in self._killed_process_nodes
+            node, _ = self._resolve_target_node_config(target_node=target_node, params=params)
+            from cluster_demo import fetch_node_metrics, get_target_database, load_cluster_config
+
+            cluster_config_path = self._resolve_cluster_config_path(params)
+            cluster = load_cluster_config(cluster_config_path)
+            target_db = get_target_database(cluster, "rw")
+            metrics = fetch_node_metrics(node, target_db)
+            node_status = str(metrics.get("status") or "").lower()
+            ok = node_status == "down"
+            reason = None if ok else (
+                "observable node state mismatch for action 'kill_db_process': "
+                f"expected status='down', got status={node_status!r}, error={metrics.get('error')!r}"
+            )
         elif action_type == "network_partition":
             ok = target_node in self._partitioned_nodes
+            reason = None if ok else f"state not applied for action '{action_type}'"
         elif action_type == "pause_node":
             ok = target_node in self._paused_nodes
+            reason = None if ok else f"state not applied for action '{action_type}'"
         else:
             ok = False
+            reason = f"state not applied for action '{action_type}'"
 
         return {
             "ok": ok,
-            "reason": None if ok else f"state not applied for action '{action_type}'",
+            "reason": reason,
             "verified_at": datetime.now(UTC).isoformat(),
+        }
+
+    @staticmethod
+    def _resolve_cluster_config_path(params: dict[str, Any]) -> Path:
+        raw_path = params.get("cluster_config_path")
+        if not raw_path:
+            raise ValueError(
+                "cluster_config_path is required for kill_db_process action to resolve target NodeConfig"
+            )
+        return Path(str(raw_path)).expanduser().resolve()
+
+    def _resolve_target_node_config(self, target_node: str, params: dict[str, Any]) -> tuple[Any, Path]:
+        from cluster_demo import load_cluster_config
+
+        cluster_config_path = self._resolve_cluster_config_path(params)
+        cluster = load_cluster_config(cluster_config_path)
+        nodes_by_name = {node.name: node for node in cluster.nodes}
+        node = nodes_by_name.get(target_node)
+        if node is None:
+            raise ValueError(
+                f"target_node '{target_node}' is not present in cluster config '{cluster_config_path}'"
+            )
+        return node, cluster_config_path
+
+    def _run_node_action(self, node: Any, action: str) -> dict[str, Any]:
+        from cluster_demo import run_node_action
+
+        ok, raw_output = run_node_action(node, action)
+        command = "unknown"
+        stdout = ""
+        stderr = ""
+
+        for line in str(raw_output).splitlines():
+            if line.startswith("Command:"):
+                command = line.split(":", 1)[1].strip()
+            elif line.startswith("Response:"):
+                stdout = line.split(":", 1)[1].strip()
+
+        if not ok and not stderr:
+            stderr = stdout
+
+        LOGGER.info(
+            "Executed node action via SSH | node=%s ssh_host=%s action=%s command=%s ok=%s stdout=%s stderr=%s",
+            node.name,
+            node.ssh_host,
+            action,
+            command,
+            ok,
+            stdout or "<empty>",
+            stderr or "<empty>",
+        )
+
+        return {
+            "ok": ok,
+            "action": action,
+            "node": node.name,
+            "ssh_host": node.ssh_host,
+            "command": command,
+            "stdout": stdout,
+            "stderr": stderr,
+            "raw_output": raw_output,
         }
 
     def _next_rollback_id(self, target_node: str) -> str:
