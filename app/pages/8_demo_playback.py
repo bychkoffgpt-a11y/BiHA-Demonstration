@@ -204,6 +204,8 @@ def _build_topology(
 
     role_by_node: dict[str, str] = {}
     status_by_node: dict[str, str] = {}
+    heuristic_status_by_node: dict[str, str] = {}
+    step_annotation_by_node: dict[str, str] = {}
     current_master: str | None = None
     if cfg_path is not None:
         live_roles, live_statuses, live_master = _load_live_roles_from_cluster(str(cfg_path))
@@ -266,9 +268,10 @@ def _build_topology(
 
     if run and run.status in {RunStatus.RUNNING, RunStatus.FAILED} and run.current_step_index >= 0:
         current_target = run.step_logs[run.current_step_index].target_node
-        for node in nodes:
-            if node["name"] == current_target:
-                node["status"] = "degraded" if run.status == RunStatus.RUNNING else "down"
+        heuristic_status_by_node[current_target] = "degraded" if run.status == RunStatus.RUNNING else "down"
+        step_annotation_by_node[current_target] = (
+            "⚠️ step running on node" if run.status == RunStatus.RUNNING else "❌ step failed on node"
+        )
 
     for node in nodes:
         name = node["name"]
@@ -279,12 +282,20 @@ def _build_topology(
         elif name != default_leader:
             node["role"] = "replica"
 
-        if name in status_by_node and node["status"] == "up":
+        if name in status_by_node:
             node["status"] = status_by_node[name]
+        elif name in heuristic_status_by_node:
+            node["status"] = heuristic_status_by_node[name]
+        if name in step_annotation_by_node:
+            node["annotation"] = step_annotation_by_node[name]
 
     if failover_detected and run and run.status == RunStatus.RUNNING:
         for node in nodes:
-            if node["name"] == default_leader and node["role"] == "replica":
+            if (
+                node["name"] == default_leader
+                and node["role"] == "replica"
+                and default_leader not in status_by_node
+            ):
                 node["status"] = "degraded"
 
     source = promoted_leader if failover_detected else default_leader
@@ -309,6 +320,7 @@ def _render_topology_map(
             extra_class += " failover-pulse"
         if role_shift_detected and node["name"] in {"pg-node-1", "pg-node-2"}:
             extra_class += " role-shift"
+        annotation_html = f'<div class="meta">{node["annotation"]}</div>' if node.get("annotation") else ""
 
         st.markdown(
             f"""
@@ -316,6 +328,7 @@ def _render_topology_map(
                 <strong>{node['name']}</strong>
                 <span class=\"role-chip\" style=\"background:{role_color};\">{node['role']}</span>
                 <div class=\"meta\">status: <span style=\"color:{status_color};font-weight:600;\">{node['status']}</span></div>
+                {annotation_html}
             </div>
             """,
             unsafe_allow_html=True,
