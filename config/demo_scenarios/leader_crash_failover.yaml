@@ -30,13 +30,25 @@ steps:
       cluster_config_path: config/cluster.json
     wait_condition:
       current_roles:
+        master_count:
+          equals: 1
+        has_single_master:
+          equals: true
         master:
           not_equals: __RUN_METRIC:old_master__
+        masters:
+          count_equals: 1
     timeout: 45
     expected:
       current_roles:
+        master_count:
+          equals: 1
+        has_single_master:
+          equals: true
         master:
           not_equals: __RUN_METRIC:old_master__
+        masters:
+          count_equals: 1
     details: Дождаться автоматического выбора нового лидера по runtime-метрикам.
   - name: validate_service_recovery
     action: verify_availability
@@ -49,11 +61,15 @@ steps:
         lte: 30
       availability_ratio:
         gte: 0.75
+      nodes_up:
+        count_gte: 2
     expected:
       measured_downtime_sec:
         lte: 30
       availability_ratio:
         gte: 0.75
+      nodes_up:
+        count_gte: 2
     details: Проверить восстановление доступности сервиса после failover.
   - name: recover_failed_leader
     action: recover_action
