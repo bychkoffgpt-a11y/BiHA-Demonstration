@@ -18,7 +18,13 @@ from orchestration.demo_runner import (
     get_demo_runner,
     get_scenario_catalog_status,
 )
+from orchestration.planned_switchover_ui import (
+    PLANNED_SWITCHOVER_SCENARIO_ID,
+    build_params_override_for_planned_switchover,
+)
 from ui_styles import apply_base_page_styles
+
+PLANNED_SWITCHOVER_TARGET_MASTER_KEY = "planned_switchover_target_master"
 
 STATUS_STYLE = {
     "pending": ("⏳", "#6b7280"),
@@ -139,31 +145,6 @@ def _load_nodes_from_config(cfg_path: Path) -> list[dict[str, str]]:
     return nodes
 
 
-def _extract_cluster_config_path(selected_scenario) -> str | None:
-    for step in selected_scenario.steps:
-        if step.action_type.lower().strip() == "switchover":
-            raw_path = step.params.get("cluster_config_path")
-            if raw_path:
-                return str(raw_path)
-    return None
-
-
-def _fetch_available_slaves(cluster_config_path: str) -> tuple[list[str], str | None]:
-    try:
-        from cluster_demo import classify_node_role, fetch_all_node_metrics, get_target_database, load_cluster_config
-
-        cluster = load_cluster_config(cluster_config_path)
-        target_db = get_target_database(cluster, "rw")
-        rows = fetch_all_node_metrics(cluster.nodes, target_db)
-        available_slaves = sorted(
-            str(row.get("node"))
-            for row in rows
-            if classify_node_role(row.get("role"), row.get("tx_read_only")) == "slave"
-        )
-        return available_slaves, None
-    except Exception as exc:  # noqa: BLE001
-        return [], str(exc)
-
 
 @st.cache_data(ttl=5, show_spinner=False)
 def _load_live_roles_from_cluster(cfg_path: str) -> tuple[dict[str, str], dict[str, str], str | None]:
@@ -208,6 +189,8 @@ def _build_topology(
 
     role_by_node: dict[str, str] = {}
     status_by_node: dict[str, str] = {}
+    heuristic_status_by_node: dict[str, str] = {}
+    step_annotation_by_node: dict[str, str] = {}
     current_master: str | None = None
     if cfg_path is not None:
         live_roles, live_statuses, live_master = _load_live_roles_from_cluster(str(cfg_path))
@@ -270,9 +253,10 @@ def _build_topology(
 
     if run and run.status in {RunStatus.RUNNING, RunStatus.FAILED} and run.current_step_index >= 0:
         current_target = run.step_logs[run.current_step_index].target_node
-        for node in nodes:
-            if node["name"] == current_target:
-                node["status"] = "degraded" if run.status == RunStatus.RUNNING else "down"
+        heuristic_status_by_node[current_target] = "degraded" if run.status == RunStatus.RUNNING else "down"
+        step_annotation_by_node[current_target] = (
+            "⚠️ step running on node" if run.status == RunStatus.RUNNING else "❌ step failed on node"
+        )
 
     for node in nodes:
         name = node["name"]
@@ -283,12 +267,20 @@ def _build_topology(
         elif name != default_leader:
             node["role"] = "replica"
 
-        if name in status_by_node and node["status"] == "up":
+        if name in status_by_node:
             node["status"] = status_by_node[name]
+        elif name in heuristic_status_by_node:
+            node["status"] = heuristic_status_by_node[name]
+        if name in step_annotation_by_node:
+            node["annotation"] = step_annotation_by_node[name]
 
     if failover_detected and run and run.status == RunStatus.RUNNING:
         for node in nodes:
-            if node["name"] == default_leader and node["role"] == "replica":
+            if (
+                node["name"] == default_leader
+                and node["role"] == "replica"
+                and default_leader not in status_by_node
+            ):
                 node["status"] = "degraded"
 
     source = promoted_leader if failover_detected else default_leader
@@ -313,6 +305,7 @@ def _render_topology_map(
             extra_class += " failover-pulse"
         if role_shift_detected and node["name"] in {"pg-node-1", "pg-node-2"}:
             extra_class += " role-shift"
+        annotation_html = f'<div class="meta">{node["annotation"]}</div>' if node.get("annotation") else ""
 
         st.markdown(
             f"""
@@ -320,6 +313,7 @@ def _render_topology_map(
                 <strong>{node['name']}</strong>
                 <span class=\"role-chip\" style=\"background:{role_color};\">{node['role']}</span>
                 <div class=\"meta\">status: <span style=\"color:{status_color};font-weight:600;\">{node['status']}</span></div>
+                {annotation_html}
             </div>
             """,
             unsafe_allow_html=True,
@@ -488,6 +482,68 @@ with st.sidebar:
         if st.button("▶️ Запустить", type="primary", width="stretch"):
             if selected_scenario.id == "planned_switchover" and not params_override.get("target_master"):
                 st.error("Для planned_switchover нужно выбрать target_master из списка standby-узлов.")
+
+    selected_label = st.selectbox("Сценарии для запуска", options=list(scenario_options.keys()), label_visibility="collapsed")
+    selected_scenario = scenario_options[selected_label]
+
+    if st.session_state.get("show_scenario_details", False):
+        _render_scenario_description_modal(selected_scenario)
+
+    st.caption(
+        f"Источник сценариев: {catalog_status.loaded_from}. Загружено: {len(scenarios)}."
+    )
+
+    params_override: dict[str, str] = {}
+    planned_switchover_result = None
+    if selected_scenario.id == PLANNED_SWITCHOVER_SCENARIO_ID:
+        selected_target_master = st.session_state.get(PLANNED_SWITCHOVER_TARGET_MASTER_KEY)
+        planned_switchover_result = build_params_override_for_planned_switchover(
+            selected_scenario,
+            selected_target_master=selected_target_master,
+        )
+
+        if planned_switchover_result.fetch_error:
+            st.error(f"Не удалось получить список standby-узлов: {planned_switchover_result.fetch_error}")
+        if planned_switchover_result.warning_message:
+            st.warning(planned_switchover_result.warning_message)
+        if planned_switchover_result.validation_error and not planned_switchover_result.available_slaves:
+            st.error(planned_switchover_result.validation_error)
+
+        available_slaves = planned_switchover_result.available_slaves
+        if available_slaves:
+            if st.session_state.get(PLANNED_SWITCHOVER_TARGET_MASTER_KEY) not in available_slaves:
+                st.session_state[PLANNED_SWITCHOVER_TARGET_MASTER_KEY] = available_slaves[0]
+            selected_target_master = st.selectbox(
+                "Целевой standby для planned_switchover",
+                options=available_slaves,
+                key=PLANNED_SWITCHOVER_TARGET_MASTER_KEY,
+                help="Выберите актуальный standby-узел на момент старта сценария.",
+            )
+            planned_switchover_result = build_params_override_for_planned_switchover(
+                selected_scenario,
+                selected_target_master=selected_target_master,
+            )
+
+        params_override = planned_switchover_result.params_override
+    planned_switchover_start_blocked = bool(
+        planned_switchover_result
+        and (
+            not planned_switchover_result.available_slaves
+            or planned_switchover_result.validation_error
+            or not params_override.get("target_master")
+        )
+    )
+
+    col_start, col_stop = st.columns(2)
+    with col_start:
+        if st.button("▶️ Запустить выбранный сценарий", type="primary", width="stretch"):
+            if planned_switchover_start_blocked and planned_switchover_result:
+                error_message = (
+                    planned_switchover_result.validation_error
+                    or planned_switchover_result.warning_message
+                    or "Запуск planned_switchover недоступен: выберите актуальный standby-узел."
+                )
+                st.error(error_message)
             else:
                 st.session_state["scenario_run_id"] = runner.start_scenario(
                     selected_scenario.id,
@@ -534,8 +590,11 @@ if run_id:
     except ValueError:
         st.warning("Текущий run_id не найден. Запустите сценарий заново.")
 
-if run and run.status in {RunStatus.PENDING, RunStatus.RUNNING}:
-    _schedule_ui_refresh(interval_ms=1000, key="demo_playback_active_run_refresh")
+live_update_enabled = st.toggle("Live update", value=True, key="demo_playback_live_update")
+if live_update_enabled:
+    active_run_statuses = {RunStatus.PENDING, RunStatus.RUNNING}
+    refresh_interval_ms = 1000 if run and run.status in active_run_statuses else 4000
+    _schedule_ui_refresh(interval_ms=refresh_interval_ms, key="demo_playback_topology_refresh")
 
 left, right = st.columns([1.25, 1])
 with left:
