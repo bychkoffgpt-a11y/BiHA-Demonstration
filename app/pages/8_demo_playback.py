@@ -24,6 +24,8 @@ from orchestration.planned_switchover_ui import (
 )
 from ui_styles import apply_base_page_styles
 
+PLANNED_SWITCHOVER_TARGET_MASTER_KEY = "planned_switchover_target_master"
+
 STATUS_STYLE = {
     "pending": ("⏳", "#6b7280"),
     "running": ("▶️", "#2563eb"),
@@ -465,7 +467,7 @@ if scenarios:
     params_override: dict[str, str] = {}
     planned_switchover_result = None
     if selected_scenario.id == PLANNED_SWITCHOVER_SCENARIO_ID:
-        selected_target_master = st.session_state.get("demo_playback_target_master")
+        selected_target_master = st.session_state.get(PLANNED_SWITCHOVER_TARGET_MASTER_KEY)
         planned_switchover_result = build_params_override_for_planned_switchover(
             selected_scenario,
             selected_target_master=selected_target_master,
@@ -480,12 +482,12 @@ if scenarios:
 
         available_slaves = planned_switchover_result.available_slaves
         if available_slaves:
-            if st.session_state.get("demo_playback_target_master") not in available_slaves:
-                st.session_state["demo_playback_target_master"] = available_slaves[0]
+            if st.session_state.get(PLANNED_SWITCHOVER_TARGET_MASTER_KEY) not in available_slaves:
+                st.session_state[PLANNED_SWITCHOVER_TARGET_MASTER_KEY] = available_slaves[0]
             selected_target_master = st.selectbox(
                 "Целевой standby для planned_switchover",
                 options=available_slaves,
-                key="demo_playback_target_master",
+                key=PLANNED_SWITCHOVER_TARGET_MASTER_KEY,
                 help="Выберите актуальный standby-узел на момент старта сценария.",
             )
             planned_switchover_result = build_params_override_for_planned_switchover(
@@ -494,12 +496,25 @@ if scenarios:
             )
 
         params_override = planned_switchover_result.params_override
+    planned_switchover_start_blocked = bool(
+        planned_switchover_result
+        and (
+            not planned_switchover_result.available_slaves
+            or planned_switchover_result.validation_error
+            or not params_override.get("target_master")
+        )
+    )
 
     col_start, col_stop = st.columns(2)
     with col_start:
         if st.button("▶️ Запустить выбранный сценарий", type="primary", width="stretch"):
-            if planned_switchover_result and planned_switchover_result.validation_error:
-                st.error(planned_switchover_result.validation_error)
+            if planned_switchover_start_blocked and planned_switchover_result:
+                error_message = (
+                    planned_switchover_result.validation_error
+                    or planned_switchover_result.warning_message
+                    or "Запуск planned_switchover недоступен: выберите актуальный standby-узел."
+                )
+                st.error(error_message)
             else:
                 st.session_state["scenario_run_id"] = runner.start_scenario(
                     selected_scenario.id,
