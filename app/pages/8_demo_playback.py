@@ -540,8 +540,11 @@ if run_id:
 else:
     st.info("Нет активного запуска. Перейдите на страницу Scenario Orchestration и запустите сценарий.")
 
-if run and run.status in {RunStatus.PENDING, RunStatus.RUNNING}:
-    _schedule_ui_refresh(interval_ms=1000, key="demo_playback_active_run_refresh")
+live_update_enabled = st.toggle("Live update", value=True, key="demo_playback_live_update")
+if live_update_enabled:
+    active_run_statuses = {RunStatus.PENDING, RunStatus.RUNNING}
+    refresh_interval_ms = 1000 if run and run.status in active_run_statuses else 4000
+    _schedule_ui_refresh(interval_ms=refresh_interval_ms, key="demo_playback_topology_refresh")
 
 left, right = st.columns([1.25, 1])
 with left:
