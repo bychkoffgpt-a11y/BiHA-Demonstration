@@ -8,6 +8,10 @@ import streamlit as st
 
 from orchestration.demo_runner import RunStatus, get_demo_runner, get_scenario_catalog_status
 from orchestration.reporting import build_and_save_report_bundle, is_run_finished
+from orchestration.planned_switchover_ui import (
+    PLANNED_SWITCHOVER_SCENARIO_ID,
+    build_params_override_for_planned_switchover,
+)
 from ui_styles import apply_base_page_styles
 
 
@@ -38,53 +42,39 @@ st.markdown(f"**Описание:** {selected_scenario.description}")
 st.markdown(f"**Критерий успеха:** {selected_scenario.success_criteria}")
 
 
-def _extract_cluster_config_path() -> str | None:
-    for step in selected_scenario.steps:
-        if step.action_type.lower().strip() == "switchover":
-            raw_path = step.params.get("cluster_config_path")
-            if raw_path:
-                return str(raw_path)
-    return None
-
-
-def _fetch_available_slaves(cluster_config_path: str) -> tuple[list[str], str | None]:
-    try:
-        from cluster_demo import classify_node_role, fetch_all_node_metrics, get_target_database, load_cluster_config
-
-        cluster = load_cluster_config(cluster_config_path)
-        target_db = get_target_database(cluster, "rw")
-        rows = fetch_all_node_metrics(cluster.nodes, target_db)
-        available_slaves = sorted(
-            str(row.get("node"))
-            for row in rows
-            if classify_node_role(row.get("role"), row.get("tx_read_only")) == "slave"
-        )
-        return available_slaves, None
-    except Exception as exc:  # noqa: BLE001
-        return [], str(exc)
-
 
 params_override: dict[str, str] = {}
-if selected_scenario.id == "planned_switchover":
-    cluster_config_path = _extract_cluster_config_path()
-    if cluster_config_path:
-        available_slaves, slaves_error = _fetch_available_slaves(cluster_config_path)
-        if slaves_error:
-            st.error(f"Не удалось получить список standby-узлов: {slaves_error}")
-        if available_slaves:
-            if st.session_state.get("scenario_orchestration_target_master") not in available_slaves:
-                st.session_state["scenario_orchestration_target_master"] = available_slaves[0]
-            selected_target_master = st.selectbox(
-                "Целевой standby для planned_switchover",
-                options=available_slaves,
-                key="scenario_orchestration_target_master",
-                help="Выберите актуальный standby-узел на момент старта сценария.",
-            )
-            params_override["target_master"] = selected_target_master
-        else:
-            st.warning("Список standby-узлов пуст. Запуск planned_switchover недоступен.")
-    else:
-        st.error("В сценарии planned_switchover не задан params.cluster_config_path для шага switchover.")
+planned_switchover_result = None
+if selected_scenario.id == PLANNED_SWITCHOVER_SCENARIO_ID:
+    selected_target_master = st.session_state.get("scenario_orchestration_target_master")
+    planned_switchover_result = build_params_override_for_planned_switchover(
+        selected_scenario,
+        selected_target_master=selected_target_master,
+    )
+
+    if planned_switchover_result.fetch_error:
+        st.error(f"Не удалось получить список standby-узлов: {planned_switchover_result.fetch_error}")
+    if planned_switchover_result.warning_message:
+        st.warning(planned_switchover_result.warning_message)
+    if planned_switchover_result.validation_error and not planned_switchover_result.available_slaves:
+        st.error(planned_switchover_result.validation_error)
+
+    available_slaves = planned_switchover_result.available_slaves
+    if available_slaves:
+        if st.session_state.get("scenario_orchestration_target_master") not in available_slaves:
+            st.session_state["scenario_orchestration_target_master"] = available_slaves[0]
+        selected_target_master = st.selectbox(
+            "Целевой standby для planned_switchover",
+            options=available_slaves,
+            key="scenario_orchestration_target_master",
+            help="Выберите актуальный standby-узел на момент старта сценария.",
+        )
+        planned_switchover_result = build_params_override_for_planned_switchover(
+            selected_scenario,
+            selected_target_master=selected_target_master,
+        )
+
+    params_override = planned_switchover_result.params_override
 
 if "scenario_run_id" not in st.session_state:
     st.session_state["scenario_run_id"] = None
@@ -96,8 +86,8 @@ if "scenario_report_artifacts" not in st.session_state:
 col_start, col_stop, col_refresh = st.columns([1, 1, 1])
 with col_start:
     if st.button("▶️ Запустить сценарий", type="primary", width="stretch"):
-        if selected_scenario.id == "planned_switchover" and not params_override.get("target_master"):
-            st.error("Для planned_switchover нужно выбрать target_master из списка standby-узлов.")
+        if planned_switchover_result and planned_switchover_result.validation_error:
+            st.error(planned_switchover_result.validation_error)
         else:
             st.session_state["scenario_run_id"] = runner.start_scenario(
                 selected_scenario.id,
