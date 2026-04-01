@@ -41,16 +41,20 @@ NODE_STATUS_COLORS = {
 }
 
 PRESENTATION_CSS = """
+.block-container {
+    padding-top: 1rem;
+    padding-bottom: 0.75rem;
+}
 .demo-node {
     border-radius: 14px;
     border: 2px solid #cbd5e1;
-    padding: 0.8rem;
-    margin-bottom: 0.75rem;
+    padding: 0.55rem;
+    margin-bottom: 0.45rem;
     background: #ffffff;
 }
 .demo-node .meta {
     color: #334155;
-    font-size: 0.9rem;
+    font-size: 0.85rem;
 }
 .role-chip {
     display: inline-block;
@@ -82,15 +86,15 @@ PRESENTATION_CSS = """
     border: 1px solid #dbeafe;
     border-left-width: 6px;
     border-radius: 10px;
-    padding: 0.55rem 0.65rem;
-    margin-bottom: 0.45rem;
+    padding: 0.4rem 0.55rem;
+    margin-bottom: 0.35rem;
     background: #f8fafc;
 }
 .event-item {
     border-left: 3px solid #cbd5e1;
-    padding: 0.4rem 0.6rem;
-    margin-bottom: 0.3rem;
-    font-size: 0.92rem;
+    padding: 0.32rem 0.5rem;
+    margin-bottom: 0.25rem;
+    font-size: 0.88rem;
 }
 .event-muted {
     color: #64748b;
@@ -337,7 +341,7 @@ def _render_step_timeline(run: ScenarioRun | None) -> None:
         return
 
     container_id = "timeline-container"
-    st.markdown(f'<div id="{container_id}" style="max-height: 320px; overflow-y: auto;">', unsafe_allow_html=True)
+    st.markdown(f'<div id="{container_id}" style="max-height: 280px; overflow-y: auto;">', unsafe_allow_html=True)
     for step in run.step_logs:
         badge, color = STATUS_STYLE.get(step.status, ("•", "#64748b"))
         st.markdown(
@@ -421,7 +425,7 @@ def _render_event_feed(run: ScenarioRun | None, failover_detected: bool) -> None
 
     events = sorted(set(events))
 
-    st.markdown('<div style="max-height: 320px; overflow-y:auto;">', unsafe_allow_html=True)
+    st.markdown('<div style="max-height: 280px; overflow-y:auto;">', unsafe_allow_html=True)
     for item in events:
         st.markdown(f'<div class="event-item">{item}<div class="event-muted">cluster event stream</div></div>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
@@ -439,7 +443,6 @@ def _schedule_ui_refresh(interval_ms: int, key: str) -> None:
 st.set_page_config(page_title="Demo Playback", layout="wide")
 apply_base_page_styles(PRESENTATION_CSS)
 st.title("Demo Playback")
-st.caption("Topology, timeline, SLO and event stream for failover demos")
 
 runner = get_demo_runner()
 catalog_status = get_scenario_catalog_status()
