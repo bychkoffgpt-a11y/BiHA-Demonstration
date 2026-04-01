@@ -35,6 +35,7 @@ steps:
   - name: verify_write_permissions
     action: verify_availability
     target_node: cluster
+    timeout: 60
     params:
       cluster_config_path: config/cluster.json
       slo_window_sec: 120

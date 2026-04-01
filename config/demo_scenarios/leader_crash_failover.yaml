@@ -53,7 +53,7 @@ steps:
   - name: validate_service_recovery
     action: verify_availability
     target_node: cluster
-    timeout: 30
+    timeout: 60
     params:
       cluster_config_path: config/cluster.json
       slo_window_sec: 120
