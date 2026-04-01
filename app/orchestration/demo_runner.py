@@ -598,8 +598,31 @@ class DemoRunner:
     def execute_action(self, run_id: str, step: Step) -> dict[str, Any]:
         """Выполнение действия шага с fault-injection guardrails и rollback metadata."""
         action_type = step.action_type.lower().strip()
-        resolved_target_node = self._resolve_action_target_node(step)
         resolved_params = self._resolve_action_params(run_id, step, action_type)
+        if (
+            action_type == "recover_action"
+            and isinstance(resolved_params.get("rollback_id"), str)
+            and step.target_node == CURRENT_LEADER_TARGET_MARKER
+        ):
+            # recover_action с rollback_id откатывает состояние по идентификатору
+            # и не зависит от текущего лидера. Если в момент recover идет выбор
+            # лидера (masters=[]), fallback на исходный target-маркер предотвращает
+            # ложное падение шага из-за transient состояния кластера.
+            try:
+                resolved_target_node = self._resolve_action_target_node(step)
+            except RuntimeError as exc:
+                if "expected exactly one current master" in str(exc):
+                    LOGGER.warning(
+                        "Recover action target resolution degraded to marker | run_id=%s step=%s error=%s",
+                        run_id,
+                        step.params.get("step_name") or step.action_type,
+                        exc,
+                    )
+                    resolved_target_node = step.target_node
+                else:
+                    raise
+        else:
+            resolved_target_node = self._resolve_action_target_node(step)
         resolved_step = Step(
             action_type=step.action_type,
             target_node=resolved_target_node,

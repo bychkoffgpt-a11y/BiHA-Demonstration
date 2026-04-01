@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 from orchestration.demo_runner import (
+    CURRENT_LEADER_TARGET_MARKER,
     CURRENT_STANDBY_TARGET_MARKER,
     DemoRunner,
     Observation,
@@ -20,6 +21,48 @@ from orchestration.scenario_loader import load_scenarios_from_directory
 
 
 class PlannedSwitchoverRunnerTests(unittest.TestCase):
+    def test_recover_action_with_rollback_id_degrades_target_resolution_for_current_leader(self) -> None:
+        runner = DemoRunner([])
+        run_id = "run-recover"
+        runner._run_metrics[run_id] = {
+            "rollback_ids_by_step": {
+                "simulate_leader_failure": "rb-42",
+            }
+        }
+        step = Step(
+            action_type="recover_action",
+            target_node=CURRENT_LEADER_TARGET_MARKER,
+            params={"rollback_id": "__ROLLBACK_ID:simulate_leader_failure__"},
+        )
+
+        runner._resolve_action_target_node = lambda _step: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            RuntimeError(
+                "Runtime validation failed: expected exactly one current master "
+                "to resolve target_node='__CURRENT_LEADER__', found 0 (masters=[])."
+            )
+        )
+
+        captured: dict[str, object] = {}
+
+        def fake_execute(action_type: str, target_node: str, params: dict[str, object]):
+            captured["action_type"] = action_type
+            captured["target_node"] = target_node
+            captured["params"] = params
+            return types.SimpleNamespace(
+                action_type=action_type,
+                target_node=target_node,
+                rollback_id=params.get("rollback_id"),
+                details={"ok": True},
+            )
+
+        runner._fault_injection.execute = fake_execute  # type: ignore[method-assign]
+
+        result = runner.execute_action(run_id, step)
+
+        self.assertEqual(captured["target_node"], CURRENT_LEADER_TARGET_MARKER)
+        self.assertEqual(captured["params"]["rollback_id"], "rb-42")  # type: ignore[index]
+        self.assertEqual(result["rollback_id"], "rb-42")
+
     def test_resolve_standby_target_uses_params_override(self) -> None:
         runner = DemoRunner([])
         step = Step(
