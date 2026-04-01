@@ -47,16 +47,20 @@ NODE_STATUS_COLORS = {
 }
 
 PRESENTATION_CSS = """
+.block-container {
+    padding-top: 1rem;
+    padding-bottom: 0.75rem;
+}
 .demo-node {
     border-radius: 14px;
     border: 2px solid #cbd5e1;
-    padding: 0.8rem;
-    margin-bottom: 0.75rem;
+    padding: 0.55rem;
+    margin-bottom: 0.45rem;
     background: #ffffff;
 }
 .demo-node .meta {
     color: #334155;
-    font-size: 0.9rem;
+    font-size: 0.85rem;
 }
 .role-chip {
     display: inline-block;
@@ -88,15 +92,15 @@ PRESENTATION_CSS = """
     border: 1px solid #dbeafe;
     border-left-width: 6px;
     border-radius: 10px;
-    padding: 0.55rem 0.65rem;
-    margin-bottom: 0.45rem;
+    padding: 0.4rem 0.55rem;
+    margin-bottom: 0.35rem;
     background: #f8fafc;
 }
 .event-item {
     border-left: 3px solid #cbd5e1;
-    padding: 0.4rem 0.6rem;
-    margin-bottom: 0.3rem;
-    font-size: 0.92rem;
+    padding: 0.32rem 0.5rem;
+    margin-bottom: 0.25rem;
+    font-size: 0.88rem;
 }
 .event-muted {
     color: #64748b;
@@ -331,7 +335,7 @@ def _render_step_timeline(run: ScenarioRun | None) -> None:
         return
 
     container_id = "timeline-container"
-    st.markdown(f'<div id="{container_id}" style="max-height: 390px; overflow-y: auto;">', unsafe_allow_html=True)
+    st.markdown(f'<div id="{container_id}" style="max-height: 280px; overflow-y: auto;">', unsafe_allow_html=True)
     for step in run.step_logs:
         badge, color = STATUS_STYLE.get(step.status, ("•", "#64748b"))
         st.markdown(
@@ -415,7 +419,7 @@ def _render_event_feed(run: ScenarioRun | None, failover_detected: bool) -> None
 
     events = sorted(set(events))
 
-    st.markdown('<div style="max-height: 390px; overflow-y:auto;">', unsafe_allow_html=True)
+    st.markdown('<div style="max-height: 280px; overflow-y:auto;">', unsafe_allow_html=True)
     for item in events:
         st.markdown(f'<div class="event-item">{item}<div class="event-muted">cluster event stream</div></div>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
@@ -433,7 +437,6 @@ def _schedule_ui_refresh(interval_ms: int, key: str) -> None:
 st.set_page_config(page_title="Demo Playback", layout="wide")
 apply_base_page_styles(PRESENTATION_CSS)
 st.title("Demo Playback")
-st.caption("Topology, timeline, SLO and event stream for failover demos")
 
 runner = get_demo_runner()
 catalog_status = get_scenario_catalog_status()
@@ -444,15 +447,41 @@ elif catalog_status.fallback_used:
     st.warning("Каталог config/demo_scenarios пуст. Используется встроенный fallback-сценарий.")
 
 scenarios = runner.list_scenarios()
-if scenarios:
-    scenario_options = {f"{scenario.name} ({scenario.id})": scenario for scenario in scenarios}
-
-    scenario_header_col, scenario_help_col = st.columns([25, 1])
-    with scenario_header_col:
-        st.markdown("**Сценарии для запуска**")
-    with scenario_help_col:
-        if st.button("?", key="scenario_description_help", help="Показать подробное описание сценария"):
+with st.sidebar:
+    st.markdown("### Управление сценарием")
+    if scenarios:
+        scenario_options = {f"{scenario.name} ({scenario.id})": scenario for scenario in scenarios}
+        selected_label = st.selectbox("Сценарий", options=list(scenario_options.keys()))
+        selected_scenario = scenario_options[selected_label]
+        if st.button("Показать описание", key="scenario_description_help", width="stretch"):
             st.session_state["show_scenario_details"] = True
+        st.caption(f"Источник сценариев: {catalog_status.loaded_from}. Загружено: {len(scenarios)}.")
+
+        params_override: dict[str, str] = {}
+        if selected_scenario.id == "planned_switchover":
+            cluster_config_path = _extract_cluster_config_path(selected_scenario)
+            if cluster_config_path:
+                available_slaves, slaves_error = _fetch_available_slaves(cluster_config_path)
+                if slaves_error:
+                    st.error(f"Не удалось получить список standby-узлов: {slaves_error}")
+                if available_slaves:
+                    if st.session_state.get("demo_playback_target_master") not in available_slaves:
+                        st.session_state["demo_playback_target_master"] = available_slaves[0]
+                    selected_target_master = st.selectbox(
+                        "Целевой standby",
+                        options=available_slaves,
+                        key="demo_playback_target_master",
+                        help="Выберите актуальный standby-узел на момент старта сценария.",
+                    )
+                    params_override["target_master"] = selected_target_master
+                else:
+                    st.warning("Список standby-узлов пуст. Запуск planned_switchover недоступен.")
+            else:
+                st.error("В сценарии planned_switchover не задан params.cluster_config_path для шага switchover.")
+
+        if st.button("▶️ Запустить", type="primary", width="stretch"):
+            if selected_scenario.id == "planned_switchover" and not params_override.get("target_master"):
+                st.error("Для planned_switchover нужно выбрать target_master из списка standby-узлов.")
 
     selected_label = st.selectbox("Сценарии для запуска", options=list(scenario_options.keys()), label_visibility="collapsed")
     selected_scenario = scenario_options[selected_label]
@@ -520,13 +549,18 @@ if scenarios:
                     selected_scenario.id,
                     params_override=params_override or None,
                 )
-    with col_stop:
-        if st.button("⏹ Остановить текущий сценарий", width="stretch"):
+
+        if st.button("⏹ Остановить", width="stretch"):
             run_id = st.session_state.get("scenario_run_id")
             if run_id:
                 runner.stop_scenario(run_id)
-else:
-    st.warning("Сценарии не зарегистрированы.")
+
+        if st.session_state.get("show_scenario_details", False):
+            _render_scenario_description_modal(selected_scenario)
+    else:
+        st.warning("Сценарии не зарегистрированы.")
+
+    st.text_input("Путь к конфигу кластера", key="demo_playback_cfg_path")
 
 st.session_state.setdefault("demo_playback_cfg_path", "config/cluster.json")
 raw_cfg_path = str(st.session_state["demo_playback_cfg_path"]).strip()
@@ -555,8 +589,6 @@ if run_id:
         run = runner.get_run_status(run_id)
     except ValueError:
         st.warning("Текущий run_id не найден. Запустите сценарий заново.")
-else:
-    st.info("Нет активного запуска. Перейдите на страницу Scenario Orchestration и запустите сценарий.")
 
 live_update_enabled = st.toggle("Live update", value=True, key="demo_playback_live_update")
 if live_update_enabled:
@@ -576,5 +608,3 @@ with c1:
     _render_step_timeline(run)
 with c2:
     _render_event_feed(run, failover_detected)
-
-st.text_input("Путь к конфигу кластера", key="demo_playback_cfg_path")
