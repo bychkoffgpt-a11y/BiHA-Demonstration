@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import copy
 import json
+import shutil
 import shlex
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -119,7 +121,46 @@ class CliOrchestrationBackend:
     def execute(self, step: Step, action_type: str) -> dict[str, Any]:
         started_monotonic = time.monotonic()
         command = self._build_command(step=step, action_type=action_type)
-        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        try:
+            completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        except FileNotFoundError as exc:
+            duration_sec = round(time.monotonic() - started_monotonic, 3)
+            if action_type in {"check_cluster_health", "verify_roles", "verify_availability"}:
+                warning = (
+                    "cluster_probe CLI is unavailable; orchestration precheck action was treated as a no-op. "
+                    "Install cluster_probe to enable real probe execution."
+                )
+                LOGGER.warning(
+                    "%s | action=%s command=%s error=%s",
+                    warning,
+                    action_type,
+                    shlex.join(command),
+                    exc,
+                )
+                return {
+                    "action_type": action_type,
+                    "target_node": step.target_node,
+                    "params": step.params,
+                    "rollback_id": None,
+                    "orchestration": {
+                        "phase": "orchestration",
+                        "mode": "degraded",
+                        "success": True,
+                        "action_type": action_type,
+                        "cluster_config_path": str(step.params.get("cluster_config_path", "")),
+                        "duration_sec": duration_sec,
+                        "executed_command": shlex.join(command),
+                        "stdout": "",
+                        "stderr": warning,
+                        "exit_code": None,
+                        "probe_output": None,
+                    },
+                    "executed_at": datetime.now(UTC).isoformat(),
+                }
+            raise RuntimeError(
+                "Orchestration CLI is not available: "
+                f"missing executable {command[0]!r}. Install cluster_probe to run action={action_type}."
+            ) from exc
         duration_sec = round(time.monotonic() - started_monotonic, 3)
         stdout = completed.stdout.strip()
         stderr = completed.stderr.strip()
@@ -156,7 +197,11 @@ class CliOrchestrationBackend:
 
     @staticmethod
     def _build_command(step: Step, action_type: str) -> list[str]:
-        command = ["cluster_probe", action_type]
+        probe_binary = shutil.which("cluster_probe")
+        if probe_binary:
+            command = [probe_binary, action_type]
+        else:
+            command = [sys.executable, "-m", "cluster_probe", action_type]
         cluster_config = str(step.params.get("cluster_config_path") or "").strip()
         if cluster_config:
             command.extend(["--cluster-config", cluster_config])

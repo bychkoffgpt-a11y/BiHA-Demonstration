@@ -168,6 +168,36 @@ class PlannedSwitchoverRunnerTests(unittest.TestCase):
 
         self.assertIn("exit_code=7", str(raised.exception))
 
+    @patch("orchestration.demo_runner.subprocess.run", side_effect=FileNotFoundError("cluster_probe"))
+    def test_execute_orchestration_precheck_degrades_when_cli_missing(self, _run_mock) -> None:
+        runner = DemoRunner([])
+        step = Step(
+            action_type="check_cluster_health",
+            target_node="cluster",
+            params={"cluster_config_path": "config/cluster.json"},
+        )
+
+        result = runner._execute_orchestration_action(step, "check_cluster_health")
+
+        orchestration = result["orchestration"]
+        self.assertEqual(orchestration["mode"], "degraded")
+        self.assertTrue(orchestration["success"])
+        self.assertIn("cluster_probe CLI is unavailable", orchestration["stderr"])
+
+    @patch("orchestration.demo_runner.subprocess.run", side_effect=FileNotFoundError("cluster_probe"))
+    def test_execute_orchestration_switchover_fails_when_cli_missing(self, _run_mock) -> None:
+        runner = DemoRunner([])
+        step = Step(
+            action_type="switchover",
+            target_node="cluster",
+            params={"cluster_config_path": "config/cluster.json", "target_master": "pg-node-2"},
+        )
+
+        with self.assertRaises(RuntimeError) as raised:
+            runner._execute_orchestration_action(step, "switchover")
+
+        self.assertIn("cluster_probe", str(raised.exception))
+
     def test_verify_availability_step_uses_wait_until(self) -> None:
         runner = DemoRunner([])
         step = Step(
