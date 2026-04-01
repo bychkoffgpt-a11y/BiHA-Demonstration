@@ -540,5 +540,16 @@ ssh -vvv -o BatchMode=yes -o ConnectTimeout=5 -i /home/appuser/.ssh/id_ed25519 p
 - формализованные критерии успешности.
 
 Экран `Orchestration / Demo Runner` читает сценарии именно из `config/demo_scenarios/*.yaml` при инициализации `get_demo_runner()`.
+
+### Встроенный модуль `cluster_probe`
+
+Для orchestration-steps (`check_cluster_health`, `verify_roles`, `verify_availability`, `switchover`) используется встроенный модуль `cluster_probe`, который поставляется вместе с репозиторием и запускается как CLI:
+
+```bash
+python -m cluster_probe --help
+```
+
+Отдельный пакет из PyPI для этого не требуется.
+
 Если каталог пуст или хотя бы один YAML не парсится/невалиден, включается fallback на встроенный `build_default_scenarios()`.
 В UI при таком fallback показывается явное предупреждение/ошибка загрузки, чтобы не было «тихого» переключения на один дефолтный сценарий.

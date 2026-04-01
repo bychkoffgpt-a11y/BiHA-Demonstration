@@ -3,3 +3,5 @@ pandas>=2.0
 psycopg[binary]>=3.2
 streamlit-autorefresh>=1.0.1
 PyYAML>=6.0
+
+# cluster_probe is bundled in this repository (module: cluster_probe).
