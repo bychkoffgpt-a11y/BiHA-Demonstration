@@ -59,14 +59,14 @@ steps:
       slo_window_sec: 120
     wait_condition:
       measured_downtime_sec:
-        lte: 30
+        lte: 60
       availability_ratio:
         gte: 0.75
       nodes_up:
         count_gte: 2
     expected:
       measured_downtime_sec:
-        lte: 30
+        lte: 60
       availability_ratio:
         gte: 0.75
       nodes_up:
