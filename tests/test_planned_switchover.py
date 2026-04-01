@@ -80,30 +80,14 @@ class PlannedSwitchoverRunnerTests(unittest.TestCase):
 
         self.assertIn("No standby nodes detected", str(raised.exception))
 
-    def test_execute_real_switchover_passes_target_master(self) -> None:
-        captured: dict[str, object] = {}
-
-        class FakeCluster:
-            pass
-
-        def fake_load_cluster_config(_path):
-            return FakeCluster()
-
-        def fake_switchover_master_role(_cluster, target_master=None):
-            captured["target_master"] = target_master
-            return {
-                "success": True,
-                "roles": {"master": "pg-node-2", "slave": "pg-node-1"},
-                "diagnostics": [],
-                "messages": [],
-                "downtime_sec": 4.2,
-                "orchestration_duration_sec": 8.4,
-            }
-
-        fake_module = types.SimpleNamespace(
-            load_cluster_config=fake_load_cluster_config,
-            switchover_master_role=fake_switchover_master_role,
+    @patch("orchestration.demo_runner.subprocess.run")
+    def test_execute_orchestration_action_uses_cli_backend(self, run_mock) -> None:
+        run_mock.return_value.returncode = 0
+        run_mock.return_value.stdout = (
+            '{"roles":{"master":"pg-node-2","slave":"pg-node-1"},'
+            '"downtime_sec":4.2,"orchestration_duration_sec":8.4,"target_master":"pg-node-2"}'
         )
+        run_mock.return_value.stderr = ""
         runner = DemoRunner([])
         step = Step(
             action_type="switchover",
@@ -111,10 +95,11 @@ class PlannedSwitchoverRunnerTests(unittest.TestCase):
             params={"cluster_config_path": "config/cluster.json", "target_master": "pg-node-2"},
         )
 
-        with patch.dict("sys.modules", {"cluster_demo": fake_module}):
-            result = runner._execute_real_switchover(step)
+        result = runner._execute_orchestration_action(step, "switchover")
 
-        self.assertEqual(captured["target_master"], "pg-node-2")
+        run_mock.assert_called_once()
+        called_command = run_mock.call_args.args[0]
+        self.assertIn("--target-master", called_command)
         self.assertEqual(result["orchestration"]["target_master"], "pg-node-2")
         self.assertEqual(result["orchestration"]["downtime_sec"], 4.2)
         self.assertEqual(result["orchestration"]["switchover_duration_sec"], 8.4)
@@ -166,49 +151,24 @@ class PlannedSwitchoverRunnerTests(unittest.TestCase):
         self.assertEqual(step.wait_condition["current_roles"]["master"]["equals"], "pg-node-2")
         self.assertEqual(step.expected["current_roles"]["master"]["equals"], "pg-node-2")
 
-    def test_execute_real_switchover_fails_when_target_not_in_available_slaves(self) -> None:
-        class FakeCluster:
-            nodes = [object(), object()]
-
-        def fake_load_cluster_config(_path):
-            return FakeCluster()
-
-        def fake_get_target_database(_cluster, _mode):
-            return "postgres"
-
-        def fake_fetch_all_node_metrics(_nodes, _db):
-            return [
-                {"node": "pg-node-1", "role": "master", "tx_read_only": "off"},
-                {"node": "pg-node-2", "role": "slave", "tx_read_only": "on"},
-            ]
-
-        def fake_classify_node_role(role, _tx_read_only):
-            return str(role)
-
-        def fake_switchover_master_role(_cluster, target_master=None):  # pragma: no cover
-            return {"success": True, "roles": {"master": target_master, "slave": "pg-node-1"}}
-
-        fake_module = types.SimpleNamespace(
-            load_cluster_config=fake_load_cluster_config,
-            get_target_database=fake_get_target_database,
-            fetch_all_node_metrics=fake_fetch_all_node_metrics,
-            classify_node_role=fake_classify_node_role,
-            switchover_master_role=fake_switchover_master_role,
-        )
+    @patch("orchestration.demo_runner.subprocess.run")
+    def test_execute_orchestration_action_raises_on_cli_failure(self, run_mock) -> None:
+        run_mock.return_value.returncode = 7
+        run_mock.return_value.stdout = ""
+        run_mock.return_value.stderr = "boom"
         runner = DemoRunner([])
         step = Step(
-            action_type="switchover",
+            action_type="verify_roles",
             target_node="cluster",
-            params={"cluster_config_path": "config/cluster.json", "target_master": "pg-node-3"},
+            params={"cluster_config_path": "config/cluster.json"},
         )
 
-        with patch.dict("sys.modules", {"cluster_demo": fake_module}):
-            with self.assertRaises(RuntimeError) as raised:
-                runner._execute_real_switchover(step)
+        with self.assertRaises(RuntimeError) as raised:
+            runner._execute_orchestration_action(step, "verify_roles")
 
-        self.assertIn("available_slaves", str(raised.exception))
+        self.assertIn("exit_code=7", str(raised.exception))
 
-    def test_verify_availability_step_is_single_shot(self) -> None:
+    def test_verify_availability_step_uses_wait_until(self) -> None:
         runner = DemoRunner([])
         step = Step(
             action_type="verify_availability",
@@ -238,7 +198,6 @@ class PlannedSwitchoverRunnerTests(unittest.TestCase):
 
         runner.execute_action = lambda _step: {"orchestration": {"switchover_duration_sec": 1.0}}  # type: ignore[method-assign]
         runner._record_run_metrics = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
-        runner.wait_until = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("wait_until must not be called"))  # type: ignore[method-assign]
         runner._resolve_observation_source = lambda *_args, **_kwargs: (  # type: ignore[method-assign]
             lambda: Observation(
                 timestamp=datetime.now(timezone.utc),
@@ -247,9 +206,22 @@ class PlannedSwitchoverRunnerTests(unittest.TestCase):
                 value={"measured_downtime_sec": 5.0, "availability_ratio": 0.95},
             )
         )
+        wait_calls = {"count": 0}
+
+        def fake_wait_until(*_args, **_kwargs):
+            wait_calls["count"] += 1
+            return Observation(
+                timestamp=datetime.now(timezone.utc),
+                source="cluster-state",
+                metric_event="availability",
+                value={"measured_downtime_sec": 5.0, "availability_ratio": 0.95},
+            )
+
+        runner.wait_until = fake_wait_until  # type: ignore[method-assign]
 
         runner._execute_step(run_id, 0, step, cancel_event)
         self.assertEqual(runner._runs[run_id].step_logs[0].status, "succeeded")
+        self.assertEqual(wait_calls["count"], 1)
 
     def test_matches_condition_supports_not_equals_run_metric_reference(self) -> None:
         runner = DemoRunner([])

@@ -326,15 +326,17 @@ def _derive_old_leader_recovery_status(run: ScenarioRun) -> dict[str, Any]:
 
 
 def _resolve_execution_mode(run: ScenarioRun) -> str:
-    simulated_flags: list[bool] = []
+    modes: list[str] = []
     for step in run.step_logs:
         if isinstance(step.action_result, dict):
             orchestration = step.action_result.get("orchestration")
-            if isinstance(orchestration, dict) and isinstance(orchestration.get("simulated"), bool):
-                simulated_flags.append(bool(orchestration["simulated"]))
-    if not simulated_flags:
-        return "simulated"
-    return "real" if all(flag is False for flag in simulated_flags) else "simulated"
+            if isinstance(orchestration, dict):
+                mode = str(orchestration.get("mode") or "").strip().lower()
+                if mode:
+                    modes.append(mode)
+    if not modes:
+        return "real"
+    return "real" if all(mode == "real" for mode in modes) else "mixed"
 
 
 def _collect_verification_artifacts(run: ScenarioRun) -> dict[str, Any]:

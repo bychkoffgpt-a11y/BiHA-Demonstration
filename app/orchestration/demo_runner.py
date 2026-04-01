@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import copy
+import json
+import shlex
+import subprocess
 import threading
 import time
 import uuid
@@ -110,6 +113,90 @@ class ScenarioRun:
     step_logs: list[StepRunLog] = field(default_factory=list)
 
 
+class CliOrchestrationBackend:
+    """CLI backend для реального выполнения orchestration-команд."""
+
+    def execute(self, step: Step, action_type: str) -> dict[str, Any]:
+        started_monotonic = time.monotonic()
+        command = self._build_command(step=step, action_type=action_type)
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        duration_sec = round(time.monotonic() - started_monotonic, 3)
+        stdout = completed.stdout.strip()
+        stderr = completed.stderr.strip()
+        probe_output = self._parse_probe_output(stdout)
+
+        if completed.returncode != 0:
+            raise RuntimeError(
+                "Orchestration CLI command failed: "
+                f"action={action_type}, exit_code={completed.returncode}, stderr={stderr or '<empty>'}"
+            )
+
+        orchestration: dict[str, Any] = {
+            "phase": "orchestration",
+            "mode": "real",
+            "success": True,
+            "action_type": action_type,
+            "cluster_config_path": str(step.params.get("cluster_config_path", "")),
+            "duration_sec": duration_sec,
+            "executed_command": shlex.join(command),
+            "stdout": stdout,
+            "stderr": stderr,
+            "exit_code": completed.returncode,
+            "probe_output": probe_output,
+        }
+        orchestration.update(self._derive_metrics(action_type=action_type, probe_output=probe_output))
+        return {
+            "action_type": action_type,
+            "target_node": step.target_node,
+            "params": step.params,
+            "rollback_id": None,
+            "orchestration": orchestration,
+            "executed_at": datetime.now(UTC).isoformat(),
+        }
+
+    @staticmethod
+    def _build_command(step: Step, action_type: str) -> list[str]:
+        command = ["cluster_probe", action_type]
+        cluster_config = str(step.params.get("cluster_config_path") or "").strip()
+        if cluster_config:
+            command.extend(["--cluster-config", cluster_config])
+        target_node = str(step.target_node or "").strip()
+        if target_node:
+            command.extend(["--target-node", target_node])
+        target_master = str(step.params.get("target_master") or "").strip()
+        if target_master:
+            command.extend(["--target-master", target_master])
+        return command
+
+    @staticmethod
+    def _parse_probe_output(stdout: str) -> dict[str, Any] | None:
+        if not stdout:
+            return None
+        try:
+            parsed = json.loads(stdout)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else {"raw": parsed}
+
+    @staticmethod
+    def _derive_metrics(action_type: str, probe_output: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(probe_output, dict):
+            return {}
+        if action_type != "switchover":
+            return {}
+        duration = probe_output.get("orchestration_duration_sec", probe_output.get("duration_sec"))
+        downtime = probe_output.get("downtime_sec")
+        roles = probe_output.get("roles") if isinstance(probe_output.get("roles"), dict) else {}
+        derived: dict[str, Any] = {
+            "switchover_duration_sec": float(duration) if isinstance(duration, (int, float)) else None,
+            "downtime_sec": float(downtime) if isinstance(downtime, (int, float)) else None,
+            "target_master": probe_output.get("target_master"),
+            "old_leader": roles.get("slave"),
+            "new_leader": roles.get("master"),
+        }
+        return {key: value for key, value in derived.items() if value is not None}
+
+
 class DemoRunner:
     """In-memory сценарный раннер с API запуска/остановки и журналом шагов."""
 
@@ -126,6 +213,7 @@ class DemoRunner:
         self._run_metrics: dict[str, dict[str, Any]] = {}
         self._scenario_timeout_sec = scenario_timeout_sec
         self._fault_injection = FaultInjectionController(max_injection_duration_sec=max_injection_duration_sec)
+        self._orchestration_backend = CliOrchestrationBackend()
         self._lock = threading.RLock()
 
     def register_scenario(self, scenario: Scenario) -> None:
@@ -385,18 +473,13 @@ class DemoRunner:
                 log.action_result = action_result
             self._record_run_metrics(run_id, step.action_type, action_result)
 
-            if step.action_type.lower().strip() == "verify_availability":
-                if cancel_event.is_set():
-                    raise RuntimeError("Step cancelled")
-                observation = self._resolve_observation_source(run_id, step)()
-            else:
-                observation = self.wait_until(
-                    run_id,
-                    step.wait_condition,
-                    step.timeout,
-                    cancel_event,
-                    observation_source=self._resolve_observation_source(run_id, step),
-                )
+            observation = self.wait_until(
+                run_id,
+                step.wait_condition,
+                step.timeout,
+                cancel_event,
+                observation_source=self._resolve_observation_source(run_id, step),
+            )
             self._record_observation_runtime_context(run_id, step, observation)
             is_valid, actual_result, reason = self.validate(run_id, step.expected, observation)
 
@@ -617,131 +700,14 @@ class DemoRunner:
                 rollback_ids[step_name] = rollback_id
 
     def _execute_orchestration_action(self, step: Step, action_type: str) -> dict[str, Any]:
-        if self._is_explicit_demo_mode(step.params):
-            return {
-                "action_type": action_type,
-                "target_node": step.target_node,
-                "params": step.params,
-                "rollback_id": None,
-                "orchestration": {
-                    "phase": "orchestration",
-                    "simulated": True,
-                    "step_name": step.params.get("step_name"),
-                    "details": step.params.get("details"),
-                    "executed_commands": [
-                        self._build_orchestration_probe_command(action_type=action_type, step=step)
-                    ],
-                },
-                "executed_at": datetime.now(UTC).isoformat(),
-            }
-
-        if action_type == "switchover":
-            return self._execute_real_switchover(step)
-        if action_type in {"check_cluster_health", "verify_roles", "verify_availability"}:
-            pseudo_command = self._build_orchestration_probe_command(action_type=action_type, step=step)
-            return {
-                "action_type": action_type,
-                "target_node": step.target_node,
-                "params": step.params,
-                "rollback_id": None,
-                "orchestration": {
-                    "phase": "orchestration",
-                    "simulated": False,
-                    "details": f"Read-only orchestration verification for action={action_type}",
-                    "executed_commands": [pseudo_command],
-                },
-                "executed_at": datetime.now(UTC).isoformat(),
-            }
-
-        raise NotImplementedError(
-            f"Orchestration action {action_type!r} requires explicit demo/mock mode "
-            "until real execution integration is implemented."
-        )
-
-    def _execute_real_switchover(self, step: Step) -> dict[str, Any]:
-        from cluster_demo import (
-            classify_node_role,
-            fetch_all_node_metrics,
-            get_target_database,
-            load_cluster_config,
-            switchover_master_role,
-        )
-
-        started_monotonic = time.monotonic()
-        cluster_config_path = self._resolve_cluster_config_path(step.params)
-        cluster = load_cluster_config(cluster_config_path)
-        requested_target_master = str(step.params.get("target_master") or "").strip() or None
-        if not requested_target_master:
+        result = self._orchestration_backend.execute(step=step, action_type=action_type)
+        orchestration = result.get("orchestration")
+        if isinstance(orchestration, dict) and orchestration.get("success") is False:
             raise RuntimeError(
-                "Switchover failed: target_master is required. "
-                "Выберите standby-узел в UI перед запуском сценария."
+                "Orchestration action failed: "
+                f"action={action_type}, details={orchestration.get('probe_output') or orchestration}"
             )
-        target_db = get_target_database(cluster, "rw")
-        metrics_rows = fetch_all_node_metrics(cluster.nodes, target_db)
-        available_slaves = sorted(
-            str(row.get("node"))
-            for row in metrics_rows
-            if classify_node_role(row.get("role"), row.get("tx_read_only")) == "slave"
-        )
-        if requested_target_master not in available_slaves:
-            raise RuntimeError(
-                "Switchover failed: target_master is not in available slaves. "
-                f"target_master='{requested_target_master}', available_slaves={available_slaves}. "
-                "Выберите один из available_slaves и перезапустите сценарий."
-            )
-        switchover_result = switchover_master_role(cluster, target_master=requested_target_master)
-        orchestration_duration_sec = round(time.monotonic() - started_monotonic, 3)
-        reported_duration = switchover_result.get("orchestration_duration_sec")
-        switchover_duration_sec = (
-            float(reported_duration)
-            if isinstance(reported_duration, (float, int))
-            else orchestration_duration_sec
-        )
-        downtime_sec_raw = switchover_result.get("downtime_sec")
-        downtime_sec = float(downtime_sec_raw) if isinstance(downtime_sec_raw, (float, int)) else None
-        roles = switchover_result.get("roles") or {}
-        old_leader = roles.get("slave")
-        new_leader = roles.get("master")
-        diagnostics = switchover_result.get("diagnostics") or []
-        messages = switchover_result.get("messages") or []
-        success = bool(switchover_result.get("success"))
-
-        action_result: dict[str, Any] = {
-            "action_type": "switchover",
-            "target_node": step.target_node,
-            "params": step.params,
-            "rollback_id": None,
-            "orchestration": {
-                "phase": "orchestration",
-                "simulated": False,
-                "cluster_config_path": str(cluster_config_path),
-                "success": success,
-                "old_leader": old_leader,
-                "new_leader": new_leader,
-                "diagnostics": diagnostics,
-                "messages": messages,
-                "switchover_duration_sec": switchover_duration_sec,
-                "downtime_sec": downtime_sec,
-                "target_master": requested_target_master,
-            },
-            "executed_at": datetime.now(UTC).isoformat(),
-        }
-        if not success:
-            raise RuntimeError(f"Switchover failed: {messages}")
-        return action_result
-
-    def _build_orchestration_probe_command(self, action_type: str, step: Step) -> str:
-        cluster_config = step.params.get("cluster_config_path")
-        command_parts = [f"cluster_probe {action_type}"]
-        if cluster_config:
-            command_parts.append(f"--cluster-config {cluster_config}")
-        if step.target_node:
-            command_parts.append(f"--target-node {step.target_node}")
-        return " ".join(command_parts)
-
-    @staticmethod
-    def _is_explicit_demo_mode(params: dict[str, Any]) -> bool:
-        return bool(params.get("demo_mode")) or bool(params.get("mock_mode"))
+        return result
 
     @staticmethod
     def _resolve_cluster_config_path(params: dict[str, Any]) -> Path:
