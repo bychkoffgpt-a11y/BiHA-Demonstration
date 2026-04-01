@@ -119,11 +119,46 @@ class ScenarioRun:
 class CliOrchestrationBackend:
     """CLI backend для реального выполнения orchestration-команд."""
 
+    _CLUSTER_METRICS_SQL_RENDERED = """
+SELECT
+    CASE WHEN pg_is_in_recovery() THEN 'slave' ELSE 'master' END,
+    COALESCE(EXTRACT(EPOCH FROM now() - pg_last_xact_replay_timestamp())::bigint, 0),
+    (
+        SELECT count(*)
+        FROM pg_locks l
+        JOIN pg_stat_activity a ON a.pid = l.pid
+        WHERE l.granted AND a.datname = %s
+    ),
+    (SELECT xact_commit FROM pg_stat_database WHERE datname = %s),
+    (SELECT xact_rollback FROM pg_stat_database WHERE datname = %s),
+    (SELECT blks_read FROM pg_stat_database WHERE datname = %s),
+    (SELECT blks_hit FROM pg_stat_database WHERE datname = %s),
+    (SELECT tup_returned FROM pg_stat_database WHERE datname = %s),
+    (SELECT tup_fetched FROM pg_stat_database WHERE datname = %s),
+    (SELECT count(*) FROM pg_stat_activity WHERE datname = %s AND state = 'active'),
+    (SELECT COALESCE(blk_read_time, 0) FROM pg_stat_database WHERE datname = %s),
+    (SELECT COALESCE(blk_write_time, 0) FROM pg_stat_database WHERE datname = %s),
+    (
+        SELECT count(*)
+        FROM pg_stat_activity
+        WHERE datname = %s AND wait_event_type = 'IO'
+    ),
+    current_setting('transaction_read_only'),
+    current_setting('track_io_timing', true)
+    """.strip()
+
     def execute(self, step: Step, action_type: str) -> dict[str, Any]:
         started_monotonic = time.monotonic()
         command = self._build_command(step=step, action_type=action_type)
         command_rendered = shlex.join(command)
         record_command("orchestration_cli", command_rendered, action_type=action_type, target_node=step.target_node)
+        if action_type in {"check_cluster_health", "verify_roles", "verify_availability"}:
+            record_command(
+                "sql_observation",
+                self._CLUSTER_METRICS_SQL_RENDERED,
+                action_type=action_type,
+                source="cluster_probe",
+            )
         try:
             completed = subprocess.run(command, capture_output=True, text=True, check=False)
         except FileNotFoundError as exc:

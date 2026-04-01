@@ -185,6 +185,17 @@ def _extract_executed_commands(action_result: object) -> str:
     if not isinstance(action_result, dict):
         return NOT_APPLICABLE_TEXT
 
+    traced_commands = action_result.get("executed_commands")
+    has_sql_observation_trace = (
+        isinstance(traced_commands, list)
+        and any(
+            isinstance(entry, dict)
+            and str(entry.get("type", "")).strip() == "sql_observation"
+            and str(entry.get("command", "")).strip()
+            for entry in traced_commands
+        )
+    )
+
     commands: list[str] = []
     details_fallback: str | None = None
 
@@ -197,7 +208,11 @@ def _extract_executed_commands(action_result: object) -> str:
     orchestration = action_result.get("orchestration")
     if isinstance(orchestration, dict):
         executed_command = orchestration.get("executed_command")
-        if isinstance(executed_command, str) and executed_command.strip():
+        if (
+            isinstance(executed_command, str)
+            and executed_command.strip()
+            and not has_sql_observation_trace
+        ):
             commands.append(executed_command.strip())
         details = orchestration.get("details")
         if isinstance(details, str) and details.strip():
@@ -219,12 +234,13 @@ def _extract_executed_commands(action_result: object) -> str:
                         if command:
                             commands.append(command)
 
-    traced_commands = action_result.get("executed_commands")
     if isinstance(traced_commands, list):
         for entry in traced_commands:
             if isinstance(entry, dict):
                 command = str(entry.get("command", "")).strip()
                 command_type = str(entry.get("type", "")).strip()
+                if has_sql_observation_trace and command_type == "orchestration_cli":
+                    continue
                 if command:
                     commands.append(f"[{command_type}] {command}" if command_type else command)
             elif isinstance(entry, str) and entry.strip():
