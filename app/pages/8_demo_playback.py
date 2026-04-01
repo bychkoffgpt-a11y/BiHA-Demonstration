@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -430,8 +429,7 @@ def _schedule_ui_refresh(interval_ms: int, key: str) -> None:
         st_autorefresh(interval=interval_ms, key=key)
         return
 
-    time.sleep(interval_ms / 1000)
-    st.rerun()
+    st.caption("Live update недоступен без зависимости streamlit-autorefresh.")
 
 
 st.set_page_config(page_title="Demo Playback", layout="wide")
