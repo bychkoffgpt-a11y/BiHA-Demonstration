@@ -191,6 +191,9 @@ def _extract_executed_commands(action_result: object) -> str:
 
     orchestration = action_result.get("orchestration")
     if isinstance(orchestration, dict):
+        executed_command = orchestration.get("executed_command")
+        if isinstance(executed_command, str) and executed_command.strip():
+            commands.append(executed_command.strip())
         details = orchestration.get("details")
         if isinstance(details, str) and details.strip():
             details_fallback = details.strip()
@@ -210,6 +213,17 @@ def _extract_executed_commands(action_result: object) -> str:
                         command = line.split(":", 1)[1].strip()
                         if command:
                             commands.append(command)
+
+    traced_commands = action_result.get("executed_commands")
+    if isinstance(traced_commands, list):
+        for entry in traced_commands:
+            if isinstance(entry, dict):
+                command = str(entry.get("command", "")).strip()
+                command_type = str(entry.get("type", "")).strip()
+                if command:
+                    commands.append(f"[{command_type}] {command}" if command_type else command)
+            elif isinstance(entry, str) and entry.strip():
+                commands.append(entry.strip())
 
     unique_commands = list(dict.fromkeys(commands))
     if unique_commands:

@@ -19,6 +19,7 @@ import psycopg
 from psycopg.conninfo import conninfo_to_dict
 import streamlit as st
 
+from orchestration.command_audit import record_command
 from logging_utils import setup_file_logger
 from ui_styles import apply_base_page_styles
 from workload_status_store import (
@@ -632,9 +633,12 @@ def select_node_for_workload(nodes: list[NodeConfig]) -> NodeConfig | None:
 def execute_workload_tx(vip_dsn: str, write_tx: bool, sizing: PgLikeSizing) -> None:
     with psycopg.connect(vip_dsn, connect_timeout=2, autocommit=False) as conn:
         with conn.cursor() as cur:
-            cur.execute(f"SET LOCAL lock_timeout = '{WORKLOAD_LOCK_TIMEOUT_MS}ms'")
-            cur.execute(f"SET LOCAL statement_timeout = '{WORKLOAD_STATEMENT_TIMEOUT_MS}ms'")
-            cur.execute("SET LOCAL idle_in_transaction_session_timeout = '10s'")
+            lock_timeout_sql = f"SET LOCAL lock_timeout = '{WORKLOAD_LOCK_TIMEOUT_MS}ms'"
+            statement_timeout_sql = f"SET LOCAL statement_timeout = '{WORKLOAD_STATEMENT_TIMEOUT_MS}ms'"
+            idle_timeout_sql = "SET LOCAL idle_in_transaction_session_timeout = '10s'"
+            for stmt in (lock_timeout_sql, statement_timeout_sql, idle_timeout_sql):
+                record_command("sql_workload", stmt, dsn=vip_dsn, write_tx=write_tx)
+                cur.execute(stmt)
         run_pg_like_tx(conn, write_tx, sizing)
         conn.commit()
 
@@ -772,6 +776,14 @@ def fetch_node_metrics(node: NodeConfig, target_db: str) -> dict[str, Any]:
             target_db,
             " ".join(CLUSTER_METRICS_SQL.split()),
             query_params,
+        )
+        record_command(
+            "sql_observation",
+            " ".join(CLUSTER_METRICS_SQL.split()),
+            node=node.name,
+            host=extract_host_from_dsn(node.dsn),
+            database=target_db,
+            params=repr(query_params),
         )
         with psycopg.connect(node.dsn, connect_timeout=2, autocommit=True) as conn:
             with conn.cursor() as cur:
@@ -954,6 +966,7 @@ def fetch_disk_metrics_via_ssh(node: NodeConfig) -> dict[str, float | int | None
     remote_cmd = 'bash -lc "LC_ALL=C iostat -dx 1 2"'
     cmd = build_ssh_command(node, remote_cmd)
     command_rendered = shlex.join(cmd)
+    record_command("ssh_observation", command_rendered, node=node.name, host=node.ssh_host, probe="disk_iostat")
     LOGGER.info(
         "Executing SSH disk metrics command | node=%s host=%s command=%s",
         node.name,
@@ -1138,6 +1151,7 @@ def run_node_action(node: NodeConfig, action: str) -> tuple[bool, str]:
 
     cmd = build_ssh_command(node, remote_cmd)
     command_rendered = shlex.join(cmd)
+    record_command("ssh_action", command_rendered, node=node.name, host=node.ssh_host, action=action)
     LOGGER.info(
         "Executing SSH node action | node=%s host=%s action=%s command=%s",
         node.name,
@@ -1982,6 +1996,7 @@ def reset_server_stats(cluster: ClusterConfig) -> list[tuple[str, str]]:
                 with conn.cursor() as cur:
                     for stmt in reset_statements:
                         try:
+                            record_command("sql_maintenance", stmt, node=node.name, dsn=node.dsn)
                             cur.execute(stmt)
                         except Exception as stmt_exc:
                             notes.append(f"{node.name}: {stmt} -> {stmt_exc}")
@@ -2028,6 +2043,7 @@ def run_node_action_via_ssh(node: NodeConfig, remote_cmd: str, timeout: int = 15
 
     cmd = build_ssh_command(node, remote_cmd)
     command_rendered = shlex.join(cmd)
+    record_command("ssh_action", command_rendered, node=node.name, host=node.ssh_host, action=remote_cmd)
     LOGGER.info(
         "Executing SSH command | node=%s host=%s timeout_sec=%s command=%s",
         node.name,

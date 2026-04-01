@@ -18,6 +18,7 @@ from typing import Any, Callable
 
 from logging_utils import setup_file_logger
 
+from .command_audit import finish_command_scope, record_command, start_command_scope
 from .fault_injection import FaultInjectionController
 from .scenario_loader import ScenarioLoadError, load_scenarios_from_directory
 
@@ -121,6 +122,8 @@ class CliOrchestrationBackend:
     def execute(self, step: Step, action_type: str) -> dict[str, Any]:
         started_monotonic = time.monotonic()
         command = self._build_command(step=step, action_type=action_type)
+        command_rendered = shlex.join(command)
+        record_command("orchestration_cli", command_rendered, action_type=action_type, target_node=step.target_node)
         try:
             completed = subprocess.run(command, capture_output=True, text=True, check=False)
         except FileNotFoundError as exc:
@@ -134,7 +137,7 @@ class CliOrchestrationBackend:
                     "%s | action=%s command=%s error=%s",
                     warning,
                     action_type,
-                    shlex.join(command),
+                    command_rendered,
                     exc,
                 )
                 return {
@@ -149,7 +152,7 @@ class CliOrchestrationBackend:
                         "action_type": action_type,
                         "cluster_config_path": str(step.params.get("cluster_config_path", "")),
                         "duration_sec": duration_sec,
-                        "executed_command": shlex.join(command),
+                        "executed_command": command_rendered,
                         "stdout": "",
                         "stderr": warning,
                         "exit_code": None,
@@ -179,7 +182,7 @@ class CliOrchestrationBackend:
             "action_type": action_type,
             "cluster_config_path": str(step.params.get("cluster_config_path", "")),
             "duration_sec": duration_sec,
-            "executed_command": shlex.join(command),
+            "executed_command": command_rendered,
             "stdout": stdout,
             "stderr": stderr,
             "exit_code": completed.returncode,
@@ -470,6 +473,9 @@ class DemoRunner:
             log = run.step_logs[step_index]
             log.status = "running"
             log.started_at = datetime.now(UTC)
+        step_scope_id = f"{run_id}:{step_index}:{step.action_type}"
+        action_result: dict[str, Any] = {}
+        start_command_scope(step_scope_id)
         try:
             action_result = self.execute_action(run_id, step)
             self._record_step_runtime_context(run_id, step, action_result)
@@ -572,6 +578,13 @@ class DemoRunner:
                 exc,
             )
             raise
+        finally:
+            scoped_commands = finish_command_scope(step_scope_id)
+            if scoped_commands and isinstance(action_result, dict):
+                action_result["executed_commands"] = scoped_commands
+                orchestration = action_result.get("orchestration")
+                if isinstance(orchestration, dict):
+                    orchestration["executed_commands"] = scoped_commands
 
     def _record_observation_runtime_context(self, run_id: str, step: Step, observation: Observation) -> None:
         step_name = str(step.params.get("step_name") or "").strip()
