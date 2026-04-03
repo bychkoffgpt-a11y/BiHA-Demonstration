@@ -1,0 +1,28 @@
+id: leader_crash_conflict
+name: Leader crash conflict
+description: >-
+  Проверка предупреждения загрузчика для verify_availability до recover_action.
+steps:
+  - action: kill_db_process
+    target_node: __CURRENT_LEADER__
+    params:
+      cluster_config_path: config/cluster.json
+      environment: demo
+      demo_mode: true
+  - action: verify_availability
+    target_node: cluster
+    timeout: 30
+    params:
+      cluster_config_path: config/cluster.json
+      slo_window_sec: 120
+    wait_condition:
+      nodes_up:
+        count_gte: 2
+  - action: recover_action
+    target_node: __CURRENT_LEADER__
+    params:
+      cluster_config_path: config/cluster.json
+      environment: demo
+      demo_mode: true
+success_criteria:
+  - Предупреждение валидации срабатывает при загрузке.

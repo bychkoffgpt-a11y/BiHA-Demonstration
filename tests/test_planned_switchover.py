@@ -21,6 +21,28 @@ from orchestration.scenario_loader import load_scenarios_from_directory
 
 
 class PlannedSwitchoverRunnerTests(unittest.TestCase):
+    def test_verify_roles_observation_records_failover_downtime_metric(self) -> None:
+        metrics = {
+            "old_master": "pg-node-1",
+            "failover_fault_injected_at": "2026-04-03T11:15:00+00:00",
+        }
+        observation = Observation(
+            timestamp=datetime(2026, 4, 3, 11, 15, 28, tzinfo=timezone.utc),
+            source="cluster-state",
+            metric_event="roles",
+            value={
+                "current_roles": {
+                    "master": "pg-node-2",
+                    "has_single_master": True,
+                }
+            },
+        )
+
+        DemoRunner._record_failover_downtime_from_observation(metrics, observation)
+
+        self.assertEqual(metrics["last_switchover_downtime_sec"], 28.0)
+        self.assertEqual(metrics["last_switchover_duration_sec"], 28.0)
+
     def test_recover_action_with_rollback_id_degrades_target_resolution_for_current_leader(self) -> None:
         runner = DemoRunner([])
         run_id = "run-recover"
@@ -383,6 +405,13 @@ class LeaderCrashFailoverScenarioValidationTests(unittest.TestCase):
 
         self.assertEqual(len(scenarios), 1)
         self.assertEqual(scenarios[0].id, "leader_crash_failover")
+
+    def test_warns_when_availability_requires_two_nodes_before_recovery(self) -> None:
+        with self.assertLogs("orchestration.scenario_loader", level="WARNING") as captured:
+            scenarios = load_scenarios_from_directory("tests/fixtures/scenario_loader/availability_before_recovery_warning")
+
+        self.assertEqual(len(scenarios), 1)
+        self.assertIn("may cause deterministic timeout while fault is still active", "\n".join(captured.output))
 
 
 if __name__ == "__main__":
