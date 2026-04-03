@@ -445,6 +445,7 @@ elif catalog_status.fallback_used:
     st.warning("Каталог config/demo_scenarios пуст. Используется встроенный fallback-сценарий.")
 
 scenarios = runner.list_scenarios()
+st.session_state.setdefault("demo_playback_cfg_path", "config/cluster.json")
 with st.sidebar:
     st.markdown("### Управление сценарием")
     if scenarios:
@@ -527,7 +528,6 @@ with st.sidebar:
 
     st.text_input("Путь к конфигу кластера", key="demo_playback_cfg_path")
 
-st.session_state.setdefault("demo_playback_cfg_path", "config/cluster.json")
 raw_cfg_path = str(st.session_state["demo_playback_cfg_path"]).strip()
 cfg_path = Path(raw_cfg_path)
 if not raw_cfg_path:
