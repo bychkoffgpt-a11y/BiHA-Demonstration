@@ -22,6 +22,17 @@ _BASE_PAGE_CSS = """
         padding-bottom: 0.6rem;
         max-width: 100% !important;
     }
+
+    [data-stale="true"] {
+        opacity: 1 !important;
+        filter: none !important;
+        -webkit-filter: none !important;
+    }
+
+    [data-stale="true"] * {
+        transition: none !important;
+        animation: none !important;
+    }
 </style>
 """
 
