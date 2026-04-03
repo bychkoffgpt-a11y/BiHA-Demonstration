@@ -263,6 +263,8 @@ def _build_topology(
             node["role"] = role_by_node[name]
         elif name == promoted_leader:
             node["role"] = "leader"
+        elif name == default_leader and promoted_leader != default_leader:
+            node["role"] = "replica"
         elif name != default_leader:
             node["role"] = "replica"
 
@@ -272,6 +274,14 @@ def _build_topology(
             node["status"] = heuristic_status_by_node[name]
         if name in step_annotation_by_node:
             node["annotation"] = step_annotation_by_node[name]
+
+    known_node_names = {node["name"] for node in nodes}
+    effective_leader = promoted_leader if promoted_leader in known_node_names else default_leader
+    for node in nodes:
+        if node["name"] == effective_leader:
+            node["role"] = "leader"
+        elif node["role"] == "leader":
+            node["role"] = "replica"
 
     if failover_detected and run and run.status == RunStatus.RUNNING:
         for node in nodes:
@@ -557,8 +567,9 @@ if run_id:
 
 live_update_enabled = st.toggle("Live update", value=True, key="demo_playback_live_update")
 if live_update_enabled:
-    active_run_statuses = {RunStatus.PENDING, RunStatus.RUNNING}
+    active_run_statuses = {RunStatus.PENDING, RunStatus.RUNNING, RunStatus.FAILED}
     refresh_interval_ms = 1000 if run and run.status in active_run_statuses else 4000
+    st.caption(f"Интервал автообновления: {refresh_interval_ms / 1000:.0f} сек.")
     _schedule_ui_refresh(interval_ms=refresh_interval_ms, key="demo_playback_topology_refresh")
 
 left, right = st.columns([1.25, 1])
