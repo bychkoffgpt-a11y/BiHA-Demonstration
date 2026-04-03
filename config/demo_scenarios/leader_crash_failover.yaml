@@ -50,6 +50,15 @@ steps:
         masters:
           count_equals: 1
     details: Дождаться автоматического выбора нового лидера по runtime-метрикам.
+  - name: recover_failed_leader
+    action: recover_action
+    target_node: __CURRENT_LEADER__
+    params:
+      cluster_config_path: config/cluster.json
+      rollback_id: __ROLLBACK_ID:simulate_leader_failure__
+      environment: demo
+      demo_mode: true
+    details: Вернуть fault-injection состояние в исходное для идемпотентного повторного запуска.
   - name: validate_service_recovery
     action: verify_availability
     target_node: cluster
@@ -71,16 +80,7 @@ steps:
         gte: 0.75
       nodes_up:
         count_gte: 2
-    details: Проверить восстановление доступности сервиса после failover.
-  - name: recover_failed_leader
-    action: recover_action
-    target_node: __CURRENT_LEADER__
-    params:
-      cluster_config_path: config/cluster.json
-      rollback_id: __ROLLBACK_ID:simulate_leader_failure__
-      environment: demo
-      demo_mode: true
-    details: Вернуть fault-injection состояние в исходное для идемпотентного повторного запуска.
+    details: Проверить восстановление доступности сервиса и состава кластера после failover и rollback.
 success_criteria:
   - Новый лидер выбран автоматически.
   - Сервис восстановлен в пределах T секунд.

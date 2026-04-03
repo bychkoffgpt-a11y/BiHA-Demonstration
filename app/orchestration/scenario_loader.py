@@ -96,6 +96,7 @@ def _load_scenario_file(path: Path) -> ScenarioDTO:
         success_criteria_text = str(success_criteria)
 
     steps = [_parse_step(path, index, step_data) for index, step_data in enumerate(steps_raw)]
+    _warn_on_availability_before_recovery(path, steps)
 
     return ScenarioDTO(
         id=str(raw_data["id"]),
@@ -224,3 +225,39 @@ def _render_scenario_templates(value: Any, context: dict[str, Any]) -> Any:
             return value
         current = current[part]
     return current
+
+
+def _warn_on_availability_before_recovery(path: Path, steps: list[StepDTO]) -> None:
+    pending_kill_step: int | None = None
+    for index, step in enumerate(steps, start=1):
+        normalized_action = step.action_type.lower().strip()
+        if normalized_action == "kill_db_process":
+            pending_kill_step = index
+            continue
+        if normalized_action == "recover_action":
+            pending_kill_step = None
+            continue
+        if normalized_action != "verify_availability" or pending_kill_step is None:
+            continue
+        wait_condition = step.wait_condition if isinstance(step.wait_condition, dict) else {}
+        nodes_up_condition = wait_condition.get("nodes_up")
+        if not isinstance(nodes_up_condition, dict):
+            continue
+        count_gte = nodes_up_condition.get("count_gte")
+        try:
+            required_nodes = int(count_gte)
+        except (TypeError, ValueError):
+            continue
+        if required_nodes < 2:
+            continue
+        LOGGER.warning(
+            (
+                "%s: step #%s uses verify_availability with nodes_up.count_gte=%s after "
+                "kill_db_process at step #%s and before recover_action; "
+                "this may cause deterministic timeout while fault is still active"
+            ),
+            path,
+            index,
+            required_nodes,
+            pending_kill_step,
+        )

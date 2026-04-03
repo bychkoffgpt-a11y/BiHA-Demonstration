@@ -634,6 +634,8 @@ class DemoRunner:
                 current_roles = observation.value.get("current_roles")
                 if isinstance(current_roles, dict) and current_roles.get("master"):
                     metrics[capture_key] = current_roles["master"]
+            if step.action_type.lower().strip() == "verify_roles":
+                self._record_failover_downtime_from_observation(metrics, observation)
 
     def _mark_cancelled(self, run_id: str, step_index: int, reason: str) -> None:
         with self._lock:
@@ -814,6 +816,38 @@ class DemoRunner:
             if rollback_id:
                 rollback_ids = metrics.setdefault("rollback_ids_by_step", {})
                 rollback_ids[step_name] = rollback_id
+            if step.action_type.lower().strip() == "kill_db_process":
+                metrics["failover_fault_injected_at"] = datetime.now(UTC).isoformat()
+                metrics["failover_fault_target_node"] = action_result.get("target_node")
+
+    @staticmethod
+    def _record_failover_downtime_from_observation(metrics: dict[str, Any], observation: Observation) -> None:
+        if "last_switchover_downtime_sec" in metrics:
+            return
+        started_at_raw = metrics.get("failover_fault_injected_at")
+        if not isinstance(started_at_raw, str):
+            return
+        old_master = metrics.get("old_master")
+        if not isinstance(old_master, str) or not old_master:
+            return
+        if not isinstance(observation.value, dict):
+            return
+        current_roles = observation.value.get("current_roles")
+        if not isinstance(current_roles, dict):
+            return
+        current_master = current_roles.get("master")
+        if not isinstance(current_master, str) or not current_master or current_master == old_master:
+            return
+        if current_roles.get("has_single_master") is not True:
+            return
+        try:
+            started_at = datetime.fromisoformat(started_at_raw)
+        except ValueError:
+            return
+        downtime_sec = max(0.0, (observation.timestamp - started_at).total_seconds())
+        metrics["last_switchover_downtime_sec"] = downtime_sec
+        metrics["last_switchover_duration_sec"] = downtime_sec
+        metrics["last_switchover_orchestration_duration_sec"] = downtime_sec
 
     def _execute_orchestration_action(self, step: Step, action_type: str) -> dict[str, Any]:
         result = self._orchestration_backend.execute(step=step, action_type=action_type)
