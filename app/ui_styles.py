@@ -23,6 +23,7 @@ _BASE_PAGE_CSS = """
         max-width: 100% !important;
     }
 
+    /* Prevent stale-element dim/blur/flicker during Streamlit reruns. */
     [data-stale="true"] {
         opacity: 1 !important;
         filter: none !important;
